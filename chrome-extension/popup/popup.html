@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>多模型划译助手</title>
+    <link rel="stylesheet" href="popup.css" />
+    <script src="popup.js" defer></script>
+  </head>
+  <body>
+    <main class="popup-shell">
+      <header class="hero">
+        <span class="brand-mark" aria-hidden="true">译</span>
+        <div>
+          <h1>多模型划译助手</h1>
+          <p>划词、段落与图片，一处完成</p>
+        </div>
+      </header>
+
+      <section class="status-card" aria-label="连接状态">
+        <div class="status-stack">
+          <div class="status-copy">
+            <span id="statusDot" class="status-dot loading" aria-hidden="true"></span>
+            <div>
+              <strong id="keyStatus">正在读取文本翻译配置…</strong>
+              <span id="modelStatus">供应商与模型</span>
+            </div>
+          </div>
+          <div class="status-copy">
+            <span id="imageStatusDot" class="status-dot loading" aria-hidden="true"></span>
+            <div>
+              <strong id="imageKeyStatus">正在读取图片翻译配置…</strong>
+              <span id="imageModelStatus">硅基流动模型</span>
+            </div>
+          </div>
+        </div>
+        <button id="settingsShortcut" class="link-button" type="button">设置</button>
+      </section>
+
+      <label class="toggle-row" for="autoTranslate">
+        <span>
+          <strong>自动划词翻译</strong>
+          <small>选择英语、日语或俄语后自动显示译文</small>
+        </span>
+        <span class="switch">
+          <input id="autoTranslate" type="checkbox" disabled />
+          <span class="switch-track" aria-hidden="true"></span>
+        </span>
+      </label>
+
+      <button id="imageTranslate" class="primary-action" type="button" disabled>
+        <span class="action-icon" aria-hidden="true">⌗</span>
+        <span>
+          <strong>框选图片翻译</strong>
+          <small>图片固定使用硅基流动所选模型</small>
+        </span>
+      </button>
+
+      <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+
+      <footer>
+        也可在网页图片上右键，选择“翻译这张图片”
+      </footer>
+    </main>
+  </body>
+</html>

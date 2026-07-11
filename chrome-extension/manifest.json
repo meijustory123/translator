@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "多模型划译助手",
+  "version": "1.1.0",
+  "description": "使用 DeepSeek 与硅基流动 Qwen 提供英语、日语、俄语划词/划段落翻译及图片翻译。",
+  "minimum_chrome_version": "114",
+  "permissions": [
+    "activeTab",
+    "contextMenus",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://api.siliconflow.cn/*",
+    "https://api.deepseek.com/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "多模型划译助手",
+    "default_popup": "popup/popup.html"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content/content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

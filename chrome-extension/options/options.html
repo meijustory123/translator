@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>划译助手设置</title>
+    <link rel="stylesheet" href="options.css" />
+    <script src="options.js" defer></script>
+  </head>
+  <body>
+    <main class="page-shell">
+      <header class="page-header">
+        <span class="brand-mark" aria-hidden="true">译</span>
+        <div>
+          <h1>划译助手设置</h1>
+          <p>配置文本与图片翻译的供应商、模型和密钥</p>
+        </div>
+      </header>
+
+      <section class="settings-card route-card" aria-labelledby="routeHeading">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">请求分流</span>
+            <h2 id="routeHeading">纯文本翻译供应商</h2>
+          </div>
+        </div>
+
+        <label class="field-label" for="textProviderMode">划词与划段翻译</label>
+        <select id="textProviderMode" class="select-field">
+          <option value="deepseek_first">DeepSeek 优先（未配置时使用硅基流动）</option>
+          <option value="siliconflow">仅使用硅基流动</option>
+        </select>
+        <p id="routeHint" class="field-hint">
+          图片翻译始终使用硅基流动和下方选择的 Qwen 多模态模型。
+        </p>
+      </section>
+
+      <section class="settings-card provider-card" aria-labelledby="siliconFlowHeading">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">文本回退 · 图片固定供应商</span>
+            <h2 id="siliconFlowHeading">硅基流动</h2>
+          </div>
+          <span id="siliconFlowBadge" class="config-badge">未配置</span>
+        </div>
+
+        <label class="field-label" for="siliconFlowModel">Qwen 模型</label>
+        <select id="siliconFlowModel" class="select-field">
+          <option value="Qwen/Qwen3.5-4B">Qwen/Qwen3.5-4B（更快、更省）</option>
+          <option value="Qwen/Qwen3.5-35B-A3B">Qwen/Qwen3.5-35B-A3B（能力更强）</option>
+        </select>
+
+        <label class="field-label field-label-spaced" for="siliconFlowApiKey">硅基流动 API Key</label>
+        <div class="key-field">
+          <input
+            id="siliconFlowApiKey"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="输入新的硅基流动 API Key"
+            aria-describedby="siliconFlowHint"
+          />
+          <button id="toggleSiliconFlowKey" class="field-button" type="button" aria-label="显示硅基流动 API Key">显示</button>
+        </div>
+        <p id="siliconFlowHint" class="field-hint">
+          右键图片和框选图片始终需要此密钥。
+        </p>
+
+        <div class="button-row">
+          <button id="saveSiliconFlow" class="primary-button" type="button">保存硅基流动设置</button>
+          <button id="testSiliconFlow" class="secondary-button" type="button">保存并测试</button>
+          <button id="clearSiliconFlow" class="danger-button" type="button">清除密钥</button>
+        </div>
+        <p id="siliconFlowStatus" class="save-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="settings-card provider-card" aria-labelledby="deepSeekHeading">
+        <div class="section-heading">
+          <div>
+            <span class="eyebrow">纯文本优先供应商</span>
+            <h2 id="deepSeekHeading">DeepSeek</h2>
+          </div>
+          <span id="deepSeekBadge" class="config-badge">未配置</span>
+        </div>
+
+        <div class="readonly-field">
+          <span>固定模型</span>
+          <code>deepseek-v4-flash</code>
+          <small>stream: true · thinking.type: disabled</small>
+        </div>
+
+        <label class="field-label field-label-spaced" for="deepSeekApiKey">DeepSeek API Key</label>
+        <div class="key-field">
+          <input
+            id="deepSeekApiKey"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="输入新的 DeepSeek API Key"
+            aria-describedby="deepSeekHint"
+          />
+          <button id="toggleDeepSeekKey" class="field-button" type="button" aria-label="显示 DeepSeek API Key">显示</button>
+        </div>
+        <p id="deepSeekHint" class="field-hint">
+          “DeepSeek 优先”模式下，配置此密钥后，划词和划段翻译会使用 DeepSeek。
+        </p>
+
+        <div class="button-row">
+          <button id="saveDeepSeek" class="primary-button" type="button">保存 DeepSeek 设置</button>
+          <button id="testDeepSeek" class="secondary-button" type="button">保存并测试</button>
+          <button id="clearDeepSeek" class="danger-button" type="button">清除密钥</button>
+        </div>
+        <p id="deepSeekStatus" class="save-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section class="info-grid" aria-label="接口配置">
+        <article class="info-card">
+          <span>硅基流动</span>
+          <code>https://api.siliconflow.cn/v1/chat/completions</code>
+        </article>
+        <article class="info-card">
+          <span>DeepSeek</span>
+          <code>https://api.deepseek.com/chat/completions</code>
+        </article>
+        <article class="info-card">
+          <span>关闭思考</span>
+          <code>硅基流动 enable_thinking: false<br />DeepSeek thinking.type: disabled</code>
+        </article>
+        <article class="info-card">
+          <span>输出长度</span>
+          <code>不发送 max_tokens</code>
+        </article>
+      </section>
+
+      <section class="privacy-card">
+        <h2>隐私与费用提示</h2>
+        <p>
+          只有你主动选择的文字会发送给当前文本供应商；右键图片或手动框选的页面区域只会发送给硅基流动。
+          扩展不保存翻译历史，也不会发送网页标题、网址或完整 HTML。
+        </p>
+        <p>
+          API 调用可能产生费用，具体额度和计费规则以对应供应商账户为准。本地扩展存储不是系统级加密保险箱，
+          能访问本机 Chrome 配置的人仍可能取得其中的密钥。
+        </p>
+      </section>
+    </main>
+  </body>
+</html>

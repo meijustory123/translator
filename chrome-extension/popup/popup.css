@@ -1,0 +1,266 @@
+:root {
+  color-scheme: light;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 344px;
+  margin: 0;
+  color: #182235;
+  background: #f7f8fc;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible + .switch-track {
+  outline: 2px solid #5b63ec;
+  outline-offset: 2px;
+}
+
+.popup-shell {
+  padding: 18px;
+}
+
+.hero {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  margin-bottom: 15px;
+}
+
+.brand-mark {
+  display: grid;
+  flex: 0 0 auto;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  color: #fff;
+  background: linear-gradient(145deg, #655cf6, #2f8df4);
+  border-radius: 12px;
+  box-shadow: 0 7px 18px rgba(75, 93, 232, 0.26);
+  font-size: 19px;
+  font-weight: 800;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 16px;
+  line-height: 1.4;
+}
+
+.hero p {
+  margin-top: 2px;
+  color: #667185;
+  font-size: 11px;
+}
+
+.status-card,
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #fff;
+  border: 1px solid #e8ebf2;
+  border-radius: 12px;
+}
+
+.status-card {
+  padding: 11px 12px;
+}
+
+.status-stack {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.status-copy {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 9px;
+}
+
+.status-copy div,
+.toggle-row > span:first-child,
+.primary-action > span:last-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.status-copy strong,
+.toggle-row strong,
+.primary-action strong {
+  font-size: 13px;
+  font-weight: 680;
+}
+
+.status-copy span:last-child,
+.toggle-row small,
+.primary-action small {
+  margin-top: 2px;
+  color: #657084;
+  font-size: 10px;
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  background: #1daf79;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(29, 175, 121, 0.13);
+}
+
+.status-dot.missing {
+  background: #e99135;
+  box-shadow: 0 0 0 3px rgba(233, 145, 53, 0.14);
+}
+
+.status-dot.loading {
+  background: #9da6b5;
+  box-shadow: 0 0 0 3px rgba(157, 166, 181, 0.14);
+}
+
+.link-button {
+  padding: 5px 7px;
+  color: #5963e9;
+  background: transparent;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.link-button:hover {
+  background: #f1f2ff;
+}
+
+.toggle-row {
+  margin-top: 10px;
+  padding: 12px;
+  cursor: pointer;
+}
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: 12px;
+}
+
+.switch input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.switch-track {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  background: #cbd1dc;
+  border-radius: 999px;
+  transition: background 0.18s ease;
+}
+
+.switch-track::after {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 1px 4px rgba(27, 35, 50, 0.24);
+  content: "";
+  transition: transform 0.18s ease;
+}
+
+.switch input:checked + .switch-track {
+  background: #5d65eb;
+}
+
+.switch input:checked + .switch-track::after {
+  transform: translateX(16px);
+}
+
+.switch input:disabled + .switch-track {
+  opacity: 0.55;
+}
+
+.primary-action {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 11px;
+  margin-top: 12px;
+  padding: 13px 14px;
+  color: #fff;
+  background: linear-gradient(135deg, #5d63e9, #477cf0);
+  border-radius: 12px;
+  box-shadow: 0 8px 18px rgba(70, 87, 222, 0.19);
+  text-align: left;
+}
+
+.primary-action:hover:not(:disabled) {
+  filter: brightness(1.04);
+}
+
+.primary-action:disabled {
+  cursor: default;
+  filter: grayscale(0.35);
+  opacity: 0.55;
+}
+
+.primary-action small {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.action-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 9px;
+  font-size: 19px;
+}
+
+.feedback {
+  min-height: 17px;
+  margin-top: 8px;
+  color: #c14757;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+footer {
+  padding-top: 9px;
+  color: #687386;
+  border-top: 1px solid #e9ecf2;
+  font-size: 10px;
+  line-height: 1.5;
+  text-align: center;
+}
