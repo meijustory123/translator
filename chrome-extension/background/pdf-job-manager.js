@@ -26,7 +26,6 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
   }
 
   const jobs = new Map();
-  const pendingJobs = new Map();
 
   function connect(port) {
     if (
@@ -42,7 +41,6 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       port,
       connected: true,
       jobIds: new Set(),
-      pendingJobIds: new Set(),
     };
 
     const onMessage = (message) => {
@@ -103,7 +101,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       return;
     }
 
-    if (jobs.has(details.jobId) || pendingJobs.has(details.jobId)) {
+    if (jobs.has(details.jobId)) {
       postJobError(
         connection,
         details.jobId,
@@ -111,7 +109,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       );
       return;
     }
-    if (connection.jobIds.size + connection.pendingJobIds.size >= 1) {
+    if (connection.jobIds.size >= 1) {
       postJobError(
         connection,
         details.jobId,
@@ -119,7 +117,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       );
       return;
     }
-    if (jobs.size + pendingJobs.size >= PDF_JOB_LIMITS.maxConcurrentJobs) {
+    if (jobs.size >= PDF_JOB_LIMITS.maxConcurrentJobs) {
       postJobError(
         connection,
         details.jobId,
@@ -128,54 +126,27 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       return;
     }
 
-    const reservation = { connection, cancelled: false };
-    pendingJobs.set(details.jobId, reservation);
-    connection.pendingJobIds.add(details.jobId);
+    const job = {
+      ...details,
+      connection,
+      status: "active",
+      activeTextCount: 0,
+      acceptedBatchCount: 0,
+      acceptedCharacters: 0,
+      acceptedUtf8Bytes: 0,
+      queuedTextCount: 0,
+      batches: new Map(),
+      seenBatchIds: new Set(),
+      queue: [],
+    };
+    jobs.set(job.jobId, job);
+    connection.jobIds.add(job.jobId);
 
-    try {
-      const resolvedRoute = await resolveTextRoute();
-      if (
-        !connection.connected ||
-        reservation.cancelled ||
-        pendingJobs.get(details.jobId) !== reservation
-      ) {
-        return;
-      }
-
-      const route = snapshotRoute(resolvedRoute);
-      const job = {
-        ...details,
-        route,
-        connection,
-        status: "active",
-        activeTextCount: 0,
-        acceptedBatchCount: 0,
-        acceptedCharacters: 0,
-        acceptedUtf8Bytes: 0,
-        queuedTextCount: 0,
-        batches: new Map(),
-        seenBatchIds: new Set(),
-        queue: [],
-      };
-      jobs.set(job.jobId, job);
-      connection.jobIds.add(job.jobId);
-
-      safePost(connection, {
-        type: "JOB_CREATED",
-        jobId: job.jobId,
-        providerLabel: route.providerLabel,
-        model: route.model,
-      });
-    } catch (error) {
-      if (connection.connected && !reservation.cancelled) {
-        postJobError(connection, details.jobId, error);
-      }
-    } finally {
-      if (pendingJobs.get(details.jobId) === reservation) {
-        pendingJobs.delete(details.jobId);
-        connection.pendingJobIds.delete(details.jobId);
-      }
-    }
+    safePost(connection, {
+      type: "JOB_CREATED",
+      jobId: job.jobId,
+      dynamicRoute: true,
+    });
   }
 
   function enqueueTextBatch(connection, message) {
@@ -212,7 +183,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
         jobId || safeIdentifier(message.jobId),
         batchId || safeIdentifier(message.batchId),
         error,
-        job?.route.providerLabel,
+        undefined,
       );
     }
   }
@@ -240,18 +211,13 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
     batch.controller = controller;
     job.activeTextCount += 1;
 
-    safePost(job.connection, {
-      type: "BATCH_STARTED",
-      jobId: job.jobId,
-      batchId: batch.batchId,
-    });
-
     void runTextBatch(job, batch, controller);
   }
 
   async function runTextBatch(job, batch, controller) {
     let output = "";
     let progressTimer = null;
+    let route = null;
     const inputIds = batch.blocks.map(({ id }) => id);
     const messages = createPdfTextBatchMessages(batch.blocks);
     const lastProgressTargets = new Map();
@@ -283,8 +249,19 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       }
     };
     try {
+      route = snapshotRoute(await resolveTextRoute());
+      if (!isCurrentActiveBatch(job, batch, controller)) {
+        return;
+      }
+      safePost(job.connection, {
+        type: "BATCH_STARTED",
+        jobId: job.jobId,
+        batchId: batch.batchId,
+        providerLabel: route.providerLabel,
+        model: route.model,
+      });
       await streamChatCompletion({
-        route: job.route,
+        route,
         messages,
         signal: controller.signal,
         requestKind: "text",
@@ -325,7 +302,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
         job.jobId,
         batch.batchId,
         error,
-        job.route.providerLabel,
+        route?.providerLabel,
       );
     } finally {
       clearTimeout(progressTimer);
@@ -367,7 +344,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
         jobId || safeIdentifier(message.jobId),
         batchId || safeIdentifier(message.batchId),
         error,
-        job?.route.providerLabel,
+        undefined,
       );
     }
   }
@@ -378,15 +355,6 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       jobId = validateIdentifier(message.jobId, "JOB_ID_INVALID");
     } catch (error) {
       postJobError(connection, safeIdentifier(message.jobId), error);
-      return;
-    }
-
-    const reservation = pendingJobs.get(jobId);
-    if (reservation?.connection === connection) {
-      reservation.cancelled = true;
-      pendingJobs.delete(jobId);
-      connection.pendingJobIds.delete(jobId);
-      safePost(connection, { type: "JOB_CANCELLED", jobId });
       return;
     }
 
@@ -450,15 +418,6 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       return;
     }
     connection.connected = false;
-
-    for (const jobId of [...connection.pendingJobIds]) {
-      const reservation = pendingJobs.get(jobId);
-      if (reservation?.connection === connection) {
-        reservation.cancelled = true;
-        pendingJobs.delete(jobId);
-      }
-    }
-    connection.pendingJobIds.clear();
 
     for (const jobId of [...connection.jobIds]) {
       const job = jobs.get(jobId);

@@ -73,7 +73,6 @@ const state = {
   settings: null,
   jobClient: null,
   jobId: "",
-  jobSnapshot: null,
   keepAliveTimer: null,
   reconnecting: false,
   reconnectToken: null,
@@ -416,7 +415,8 @@ function updateAnalysisSummary() {
     return;
   }
   providerSummary.textContent =
-    `原生文字将分 ${state.batches.length} 批发送到 ${state.settings.providerLabel} / ${state.settings.textModel}；` +
+    `原生文字将分 ${state.batches.length} 批发送；每个批次开始时使用当时的当前文本供应商和模型。` +
+    `当前配置为 ${state.settings.providerLabel} / ${state.settings.textModel}；` +
     `${scannedPages} 个扫描页不会发送。原始 PDF、文件名和页面图像都不会上传。`;
 }
 
@@ -538,13 +538,7 @@ async function startTranslation() {
   }
 
   try {
-    await createBackgroundJob({
-      generation,
-      expectedSnapshot: {
-        providerLabel: state.settings.providerLabel,
-        model: state.settings.textModel,
-      },
-    });
+    await createBackgroundJob({ generation });
     if (generation !== state.generation || state.phase !== "starting" || state.disposed) return;
     state.phase = "translating";
     setJobControls(true);
@@ -555,17 +549,13 @@ async function startTranslation() {
   } catch (error) {
     if (generation !== state.generation || state.disposed) return;
     state.phase = "ready";
-    if (error?.code === "ROUTE_SNAPSHOT_CHANGED") {
-      privacyConfirm.checked = false;
-      void refreshPdfSettings();
-    }
     setDocumentStatus(toReaderMessage(error), "error");
     overallProgressText.textContent = toReaderMessage(error);
     updateStartButton();
   }
 }
 
-async function createBackgroundJob({ generation, expectedSnapshot }) {
+async function createBackgroundJob({ generation }) {
   state.jobClient?.cancelJob();
   state.jobClient?.disconnect();
   const jobId = createSafeId("pdf-job");
@@ -575,9 +565,8 @@ async function createBackgroundJob({ generation, expectedSnapshot }) {
   });
   state.jobId = jobId;
   state.jobClient = client;
-  let snapshot;
   try {
-    snapshot = await client.createJob({
+    await client.createJob({
       jobId,
       fingerprint: state.fingerprint,
       pageCount: state.pages.length,
@@ -602,34 +591,8 @@ async function createBackgroundJob({ generation, expectedSnapshot }) {
     if (state.jobId === jobId) state.jobId = "";
     throw new DOMException("Aborted", "AbortError");
   }
-  try {
-    assertSameRouteSnapshot(snapshot, expectedSnapshot);
-  } catch (error) {
-    client.cancelJob();
-    client.disconnect();
-    if (state.jobClient === client) state.jobClient = null;
-    if (state.jobId === jobId) state.jobId = "";
-    throw error;
-  }
-  state.jobSnapshot = {
-    providerLabel: snapshot.providerLabel,
-    model: snapshot.model,
-  };
   providerSummary.textContent =
-    `本任务已锁定 ${snapshot.providerLabel} / ${snapshot.model}；仅发送当前文字批次，扫描页和原始 PDF 不会上传。`;
-}
-
-function assertSameRouteSnapshot(actual, expected) {
-  if (
-    actual?.providerLabel === expected?.providerLabel
-    && actual?.model === expected?.model
-  ) {
-    return;
-  }
-  throw createReaderError(
-    "翻译供应商或模型刚刚发生变化。请重新检查发送范围并再次确认。",
-    "ROUTE_SNAPSHOT_CHANGED",
-  );
+    "每个文本批次都会在开始时读取当前供应商与模型；仅发送当前文字批次，扫描页和原始 PDF 不会上传。";
 }
 
 function scheduleBatches() {
@@ -671,6 +634,14 @@ function handleJobEvent(message) {
       const card = state.pageCards.get(batch.pageNumber);
       card.querySelector('[data-role="translation-status"]').textContent =
         message.type === "DELTA" ? "正在接收结构化译文…" : "已发送当前批次";
+      if (
+        message.type === "BATCH_STARTED"
+        && typeof message.providerLabel === "string"
+        && typeof message.model === "string"
+      ) {
+        providerSummary.textContent =
+          `当前批次使用 ${message.providerLabel} / ${message.model}；后续批次仍会读取届时的当前配置。`;
+      }
     }
     return;
   }
@@ -874,7 +845,6 @@ async function retryPage(pageNumber) {
 
 async function rebuildJobForPageRetry(pageNumber, retryPlan) {
   const generation = state.generation;
-  const expectedSnapshot = state.jobSnapshot;
   state.phase = "retry_preparing";
   overallProgressText.textContent = "正在刷新设置并为失败页面重建翻译任务…";
   setDocumentStatus("正在准备重试失败页面", "working");
@@ -893,22 +863,11 @@ async function rebuildJobForPageRetry(pageNumber, retryPlan) {
     return;
   }
 
-  const currentSnapshot = {
-    providerLabel: settings.providerLabel,
-    model: settings.textModel,
-  };
   state.batches = retryPlan.nextBatches;
-  try {
-    assertSameRouteSnapshot(currentSnapshot, expectedSnapshot);
-  } catch (error) {
-    requireRetryRouteConfirmation(pageNumber, error);
-    return;
-  }
-
   state.phase = "starting";
   updatePageState(pageNumber);
   try {
-    await createBackgroundJob({ generation, expectedSnapshot: currentSnapshot });
+    await createBackgroundJob({ generation });
     if (generation !== state.generation || state.phase !== "starting" || state.disposed) return;
     state.phase = "translating";
     setJobControls(true);
@@ -918,11 +877,6 @@ async function rebuildJobForPageRetry(pageNumber, retryPlan) {
     scheduleBatches();
   } catch (error) {
     if (generation !== state.generation || state.disposed) return;
-    if (error?.code === "ROUTE_SNAPSHOT_CHANGED") {
-      requireRetryRouteConfirmation(pageNumber, error);
-      void refreshPdfSettings();
-      return;
-    }
     state.batches = retryPlan.previousBatches;
     state.phase = "finished_with_errors";
     stopKeepAlive();
@@ -962,17 +916,6 @@ function createPageRetryPlan(pageNumber) {
     previousBatches: state.batches,
     nextBatches,
   };
-}
-
-function requireRetryRouteConfirmation(pageNumber, error) {
-  state.phase = "ready";
-  privacyConfirm.checked = false;
-  setJobControls(false);
-  overallProgressText.textContent =
-    "供应商或模型已变化。请重新核对发送范围并勾选确认，再继续未完成批次。";
-  setDocumentStatus(toReaderMessage(error), "error");
-  updatePageState(pageNumber);
-  updateStartButton();
 }
 
 function splitBatchForManualRetry(batch) {
@@ -1025,7 +968,6 @@ async function reconnectBackgroundJob() {
   if (state.reconnecting || state.disposed || state.phase !== "translating") return;
   const generation = state.generation;
   const jobId = state.jobId;
-  const expectedSnapshot = state.jobSnapshot;
   const reconnectToken = {};
   state.reconnecting = true;
   state.reconnectToken = reconnectToken;
@@ -1043,7 +985,7 @@ async function reconnectBackgroundJob() {
           if (state.jobClient === client) handleJobDisconnect(info);
         },
       });
-      const snapshot = await client.createJob({
+      await client.createJob({
         jobId,
         fingerprint: state.fingerprint,
         pageCount: state.pages.length,
@@ -1053,7 +995,6 @@ async function reconnectBackgroundJob() {
         client.disconnect();
         break;
       }
-      assertSameRouteSnapshot(snapshot, expectedSnapshot);
       state.jobClient = client;
       state.reconnecting = false;
       state.reconnectToken = null;
@@ -1065,29 +1006,17 @@ async function reconnectBackgroundJob() {
       lastError = error;
       client?.cancelJob();
       client?.disconnect();
-      if (error?.code === "ROUTE_SNAPSHOT_CHANGED") break;
     }
   }
   if (state.reconnectToken !== reconnectToken) return;
   state.reconnecting = false;
   state.reconnectToken = null;
   if (state.phase === "translating") {
-    if (lastError?.code === "ROUTE_SNAPSHOT_CHANGED") {
-      state.phase = "ready";
-      privacyConfirm.checked = false;
-      setJobControls(false);
-      overallProgressText.textContent =
-        "供应商或模型已变化。请重新核对发送范围并勾选确认，再继续未完成批次。";
-      setDocumentStatus("等待重新确认翻译供应商", "error");
-      void refreshPdfSettings();
-      updateStartButton();
-    } else {
-      state.phase = "paused";
-      pauseTranslationButton.hidden = true;
-      resumeTranslationButton.hidden = false;
-      overallProgressText.textContent = `${toReaderMessage(lastError)} 请点击“继续”重试连接。`;
-      setDocumentStatus("PDF 翻译连接已暂停", "error");
-    }
+    state.phase = "paused";
+    pauseTranslationButton.hidden = true;
+    resumeTranslationButton.hidden = false;
+    overallProgressText.textContent = `${toReaderMessage(lastError)} 请点击“继续”重试连接。`;
+    setDocumentStatus("PDF 翻译连接已暂停", "error");
   }
 }
 
@@ -1308,7 +1237,6 @@ async function resetDocument({ preserveGeneration = false } = {}) {
   state.pendingStreamPageNumbers.clear();
   if (state.streamRenderFrame != null) cancelAnimationFrame(state.streamRenderFrame);
   state.streamRenderFrame = null;
-  state.jobSnapshot = null;
   state.reconnecting = false;
   state.reconnectToken = null;
   destroyRenderedPages();

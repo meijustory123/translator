@@ -20,8 +20,8 @@
 2. 扩展打开 `pdf/reader.html` 独立页面。
 3. 用户拖入或选择本地 PDF；扩展不上传原始 PDF 文件，但翻译整本文档时，全文文本或全部页面图像仍会分批发送给对应供应商。
 4. 工作台分析每一页是文本型、扫描型还是混合型，并显示预计会使用的供应商：
-   - 原生文本：按当前设置使用 DeepSeek 优先或硅基流动。
-   - 扫描页/图片区域：始终使用硅基流动所选 Qwen 多模态模型。
+   - 原生文本：每个文本批次开始时重新读取当前设置，使用届时生效的 DeepSeek 优先或硅基流动模型，不在 PDF 任务级锁定模型。
+   - 扫描页/图片区域：每次图片请求都使用硅基流动届时的当前 Qwen 多模态模型。
 5. 用户确认后开始翻译，可按页暂停、继续、取消或重试。
 6. 阅读界面提供三种视图：仅原文、仅译文、左右双语对照。
 7. 首版导出双语 HTML/打印版；后续再增加真正的译文 PDF 导出。
@@ -106,13 +106,13 @@ PDF.js 必须随扩展本地打包，不能从 CDN 加载脚本，以满足 MV3 
 
 PDF 工作台使用独立长连接 `runtime.connect({name: "pdf-translation-job"})`。建议消息协议至少包含：
 
-- `CREATE_PDF_JOB`：登记 `jobId`、文件指纹、页数、供应商快照和模型快照。
+- `CREATE_PDF_JOB`：只登记 `jobId`、文件指纹和页数；供应商、模型与密钥在每个批次开始时重新读取。
 - `TRANSLATE_TEXT_BATCH`：传递受限长度的 UTF-8 文本块数组，不传任意 URL。
 - `TRANSLATE_IMAGE_TILE`：传递已经在 PDF 页面本地裁剪并压缩的 JPEG/WebP `ArrayBuffer`、MIME、宽高和页码；后台再次校验 MIME、字节数和像素数。
 - `CANCEL_BATCH / CANCEL_JOB`：按 `jobId + batchId` 取消，不影响同一文档的其他批次。
 - `DELTA / BATCH_DONE / BATCH_ERROR`：所有结果都带 `jobId + batchId`，丢弃迟到消息。
 
-后台不能复用当前“每个端口只有一个控制器”的页面划译状态。`pdf-job-manager.js` 需要维护 `Map<jobId, Map<batchId, AbortController>>`，才能实现文本并发 2、图片并发 1。PDF 页面渲染发生在工作台，不再调用 `captureVisibleTab`。
+后台不能复用当前“每个端口只有一个控制器”的页面划译状态。`pdf-job-manager.js` 维护 `Map<jobId, Map<batchId, AbortController>>`，实现文本并发 10；后续图片通道并发仍为 1。PDF 页面渲染发生在工作台，不再调用 `captureVisibleTab`。
 
 MV3 service worker 可能被回收，因此可恢复状态由工作台写入 IndexedDB；后台只保存当前活动控制器。端口断开后中止在途请求，工作台重连时根据已完成批次清单重新排队，不能依赖 service worker 内存恢复任务。
 

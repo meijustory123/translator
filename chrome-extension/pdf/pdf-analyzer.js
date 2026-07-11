@@ -23,6 +23,7 @@ const CAPTION_TEXT_RE = /^\s*(?:fig(?:ure)?|table)\s*[.\dIVXLC:-]+/iu;
 const METADATA_TEXT_RE = /^(?:\S+@\S+|(?:https?:\/\/|doi\s*:|arxiv\s*:).+)$/iu;
 const EQUATION_NUMBER_RE = /^(?:\(?\d+(?:[a-z]|\.\d+)?\)?|\[\d+(?:[a-z]|\.\d+)?\])$/iu;
 const REFERENCE_ENTRY_RE = /^\s*\[\s*\d+(?:\s*[-,]\s*\d+)*\s*\]/u;
+const CITATION_END_RE = /\[\s*\d+(?:\s*[-,]\s*\d+)*\s*\][.)]?$/u;
 const BOLD_FONT_RE = /(?:bold|semibold|demi|black|heavy|cmbx|cmssbx|timesbd|helvetica-bold)/iu;
 const ITALIC_FONT_RE = /(?:italic|oblique|slanted|cmti|cmsl|timesi)/iu;
 
@@ -996,11 +997,17 @@ function annotateParagraphSignals(lines) {
   for (const entries of groups.values()) {
     const leftEdge = percentile(entries.map((line) => line.layoutBBox.x), 0.15);
     const typicalWidth = percentile(entries.map((line) => line.layoutBBox.width), 0.72);
+    const indentation = entries.map((line) => {
+      const threshold = Math.max(6, line.fontSize * 0.8);
+      return line.layoutBBox.x - leftEdge >= threshold;
+    });
     let referenceEntryActive = false;
     let hangingIndent = null;
-    for (const line of entries) {
-      const indentThreshold = Math.max(4, line.fontSize * 0.55);
-      const indented = line.layoutBBox.x - leftEdge >= indentThreshold;
+    for (let index = 0; index < entries.length; index += 1) {
+      const line = entries[index];
+      const previous = entries[index - 1];
+      const next = entries[index + 1];
+      const indented = indentation[index];
       const explicitReferenceStart = REFERENCE_ENTRY_RE.test(line.text);
       let hangingContinuation = false;
       if (explicitReferenceStart) {
@@ -1021,8 +1028,24 @@ function annotateParagraphSignals(lines) {
           hangingIndent = null;
         }
       }
+      const previousGap = previous
+        ? line.layoutBBox.y - bboxBottom(previous.layoutBBox)
+        : Number.POSITIVE_INFINITY;
+      const previousLooksClosed = !previous
+        || previous.layoutBBox.width <= typicalWidth * 0.76
+        || TERMINAL_PUNCTUATION_RE.test(previous.text)
+        || CITATION_END_RE.test(previous.text)
+        || previousGap > Math.max(3, line.fontSize * 0.45);
+      // A real first-line indent is normally isolated: the following wrapped
+      // line returns to the column edge. Treating every offset line as a new
+      // paragraph fragments justified or imperfectly aligned PDF text.
+      const isolatedFirstLineIndent = indented
+        && !indentation[index - 1]
+        && (!next || !indentation[index + 1])
+        && previousLooksClosed;
       signals.set(line, {
-        paragraphStart: (indented || explicitReferenceStart) && !hangingContinuation,
+        paragraphStart: (explicitReferenceStart || isolatedFirstLineIndent)
+          && !hangingContinuation,
         shortLine: line.layoutBBox.width <= typicalWidth * 0.76,
       });
     }
@@ -1067,7 +1090,7 @@ function canMergeLines(previous, next) {
   const nextCenter = next.layoutBBox.x + next.layoutBBox.width / 2;
   const centerAligned = Math.abs(previousCenter - nextCenter) <= Math.max(18, fontSize * 1.8);
   if (indentDifference > Math.max(18, fontSize * 1.5) && !centerAligned) return false;
-  if (gap > fontSize * 0.35 && TERMINAL_PUNCTUATION_RE.test(previous.text)) return false;
+  if (gap > fontSize * 0.6 && TERMINAL_PUNCTUATION_RE.test(previous.text)) return false;
   return true;
 }
 
