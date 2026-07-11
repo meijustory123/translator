@@ -1,4 +1,4 @@
-# 开源的Chrome划词AI翻译插件
+# AI网页划词翻译插件（chrome版）
 
 这是一个原生 Chrome Manifest V3 扩展，支持 DeepSeek 与硅基流动模型分流，以及英语、日语、俄语的划词翻译、划段落翻译和图片翻译。扩展代码位于 `chrome-extension/`，不需要安装依赖或执行构建命令。
 
