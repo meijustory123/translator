@@ -1,4 +1,4 @@
-<img width="3388" height="1336" alt="image" src="https://github.com/user-attachments/assets/7f428e62-743b-4dfb-b3a2-4778b6ca4f95" /># 浏览器多模态AI翻译插件（支持文本、图片、PDF翻译）
+# 浏览器多模态AI翻译插件（支持文本、图片、PDF翻译）
 
 这是一个原生 Chrome Manifest V3 扩展，支持 DeepSeek 与硅基流动模型分流，以及英语、日语、俄语的划词、段落、图片和本地文本型 PDF 翻译。扩展代码位于 `chrome-extension/`
 
