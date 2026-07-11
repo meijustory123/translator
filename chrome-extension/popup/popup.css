@@ -223,6 +223,22 @@ h1 {
   text-align: left;
 }
 
+.page-status {
+  min-height: 17px;
+  margin-top: 8px;
+  color: #237859;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.page-status.checking {
+  color: #687386;
+}
+
+.page-status.error {
+  color: #c14757;
+}
+
 .primary-action:hover:not(:disabled) {
   filter: brightness(1.04);
 }

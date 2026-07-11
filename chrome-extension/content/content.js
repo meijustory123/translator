@@ -1,15 +1,39 @@
 (() => {
   "use strict";
 
-  if (globalThis.__siliconFlowSelectionTranslatorLoaded) {
+  const CONTENT_SCRIPT_VERSION = "1.1.3";
+  const forceReload = globalThis.__multiModelTranslatorForceReload === true;
+  delete globalThis.__multiModelTranslatorForceReload;
+
+  if (!forceReload && globalThis.__multiModelTranslatorVersion === CONTENT_SCRIPT_VERSION) {
     return;
   }
+  if (typeof globalThis.__multiModelTranslatorDispose === "function") {
+    try {
+      globalThis.__multiModelTranslatorDispose();
+    } catch {
+      // A legacy or invalidated instance may not be able to clean itself up fully.
+    }
+  }
+  if (globalThis.__siliconFlowSelectionTranslatorLoaded) {
+    document.getElementById("siliconflow-selection-translator-root")?.remove();
+  }
   globalThis.__siliconFlowSelectionTranslatorLoaded = true;
+  globalThis.__multiModelTranslatorVersion = CONTENT_SCRIPT_VERSION;
 
   const TRANSLATION_PORT_NAME = "multi-provider-translation";
   const MAX_TEXT_LENGTH = 20_000;
   const SELECTION_DEBOUNCE_MS = 320;
   const CONTEXT_IMAGE_MAX_AGE_MS = 30_000;
+  const SETTINGS_RETRY_DELAYS_MS = [250, 750, 1_500];
+  const IMAGE_REQUEST_WATCHDOG_MS = 195_000;
+  const IMAGE_PROGRESS_TEXT = Object.freeze({
+    SCREENSHOT_CAPTURED: "截图完成，正在处理所选图片…",
+    IMAGE_PREPARED: "图片已处理，正在准备上传…",
+    REQUEST_SENT: "正在向硅基流动发送图片…",
+    RESPONSE_STARTED: "模型已响应，正在识别图片文字…",
+    STREAMING: "正在生成译文…",
+  });
 
   let autoTranslateEnabled = false;
   let settingsLoaded = false;
@@ -18,12 +42,20 @@
   let lastImageContext = null;
   let activeRequest = null;
   let visibleAnchor = null;
+  let manualPanelPosition = null;
   let renderTimer = null;
+  let settingsRetryTimer = null;
+  let disposed = false;
+  const listenerController = new AbortController();
 
   const ui = createTranslatorUi();
   void loadPublicSettings();
 
-  document.addEventListener("selectionchange", () => scheduleSelectionCheck(SELECTION_DEBOUNCE_MS));
+  document.addEventListener(
+    "selectionchange",
+    () => scheduleSelectionCheck(SELECTION_DEBOUNCE_MS),
+    { signal: listenerController.signal },
+  );
   document.addEventListener(
     "pointerup",
     (event) => {
@@ -32,7 +64,7 @@
       }
       scheduleSelectionCheck(60);
     },
-    true,
+    { capture: true, signal: listenerController.signal },
   );
   document.addEventListener(
     "keyup",
@@ -41,18 +73,32 @@
         scheduleSelectionCheck(90);
       }
     },
-    true,
+    { capture: true, signal: listenerController.signal },
   );
-  document.addEventListener("contextmenu", rememberImageContext, true);
-  window.addEventListener("scroll", hidePanelWhileScrolling, { passive: true, capture: true });
-  window.addEventListener("resize", () => {
-    if (!ui.panel.hidden && visibleAnchor) {
-      positionPanel(visibleAnchor);
-    }
+  document.addEventListener("contextmenu", rememberImageContext, {
+    capture: true,
+    signal: listenerController.signal,
   });
-  document.addEventListener("keydown", handleGlobalKeydown, true);
+  window.addEventListener("scroll", hidePanelWhileScrolling, {
+    passive: true,
+    capture: true,
+    signal: listenerController.signal,
+  });
+  window.addEventListener(
+    "resize",
+    () => {
+      if (!ui.panel.hidden && visibleAnchor) {
+        positionPanel(visibleAnchor);
+      }
+    },
+    { signal: listenerController.signal },
+  );
+  document.addEventListener("keydown", handleGlobalKeydown, {
+    capture: true,
+    signal: listenerController.signal,
+  });
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  const handleRuntimeMessage = (message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") {
       return false;
     }
@@ -64,8 +110,40 @@
         cancelActiveRequest();
         hidePanel();
       }
+      if (autoTranslateEnabled) {
+        scheduleSelectionCheck(0);
+      }
       sendResponse({ ok: true });
       return false;
+    }
+
+    if (message.type === "PING_CONTENT_SCRIPT") {
+      void Promise.resolve()
+        .then(() => chrome.runtime.sendMessage({ type: "GET_PUBLIC_SETTINGS" }))
+        .then((settings) => {
+          if (disposed) {
+            throw new Error("INSTANCE_DISPOSED");
+          }
+          if (!settings?.ok) {
+            throw new Error("SETTINGS_UNAVAILABLE");
+          }
+          autoTranslateEnabled = settings.autoTranslate !== false;
+          settingsLoaded = true;
+          sendResponse({
+            ok: true,
+            version: CONTENT_SCRIPT_VERSION,
+            autoTranslate: autoTranslateEnabled,
+            settingsLoaded: true,
+          });
+        })
+        .catch(() =>
+          sendResponse({
+            ok: false,
+            version: CONTENT_SCRIPT_VERSION,
+            settingsLoaded: false,
+          }),
+        );
+      return true;
     }
 
     if (message.type === "START_IMAGE_SELECTION") {
@@ -81,24 +159,61 @@
     }
 
     return false;
-  });
+  };
+  chrome.runtime.onMessage.addListener(handleRuntimeMessage);
 
-  async function loadPublicSettings() {
+  globalThis.__multiModelTranslatorDispose = () => {
+    disposed = true;
+    listenerController.abort();
+    clearTimeout(selectionTimer);
+    clearTimeout(renderTimer);
+    clearTimeout(settingsRetryTimer);
+    cancelActiveRequest();
+    ui.cancelPanelDrag?.();
+    try {
+      chrome.runtime.onMessage.removeListener(handleRuntimeMessage);
+    } catch {
+      // The previous extension context may already be invalidated.
+    }
+    ui.host.remove();
+  };
+
+  async function loadPublicSettings(attempt = 0) {
+    if (disposed) {
+      return;
+    }
     try {
       const settings = await chrome.runtime.sendMessage({ type: "GET_PUBLIC_SETTINGS" });
+      if (disposed) {
+        return;
+      }
       if (!settings?.ok) {
         throw new Error("SETTINGS_UNAVAILABLE");
       }
       autoTranslateEnabled = settings?.autoTranslate !== false;
+      settingsLoaded = true;
+      if (autoTranslateEnabled) {
+        scheduleSelectionCheck(0);
+      }
     } catch {
+      if (disposed) {
+        return;
+      }
       autoTranslateEnabled = false;
-    } finally {
+      if (attempt < SETTINGS_RETRY_DELAYS_MS.length) {
+        settingsLoaded = false;
+        settingsRetryTimer = setTimeout(() => {
+          settingsRetryTimer = null;
+          void loadPublicSettings(attempt + 1);
+        }, SETTINGS_RETRY_DELAYS_MS[attempt]);
+        return;
+      }
       settingsLoaded = true;
     }
   }
 
   function scheduleSelectionCheck(delay) {
-    if (!settingsLoaded || !autoTranslateEnabled || !ui.overlay.hidden) {
+    if (disposed || !settingsLoaded || !autoTranslateEnabled || !ui.overlay.hidden) {
       return;
     }
 
@@ -107,7 +222,7 @@
   }
 
   function checkCurrentSelection() {
-    if (!autoTranslateEnabled || !ui.overlay.hidden || isEditingText()) {
+    if (disposed || !autoTranslateEnabled || !ui.overlay.hidden || isEditingText()) {
       return;
     }
 
@@ -441,14 +556,40 @@
 
   function afterTwoPaints() {
     return new Promise((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(resolve));
+      let settled = false;
+      let fallbackTimer = null;
+      const finish = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(fallbackTimer);
+        resolve();
+      };
+      fallbackTimer = setTimeout(finish, 750);
+      requestAnimationFrame(() => requestAnimationFrame(finish));
     });
   }
 
   function startTranslation(payload, view) {
+    if (disposed) {
+      return;
+    }
     cancelActiveRequest();
-    const requestId = crypto.randomUUID();
-    const port = chrome.runtime.connect({ name: TRANSLATION_PORT_NAME });
+    let requestId;
+    let port;
+    try {
+      requestId = createRequestId();
+      port = chrome.runtime.connect({ name: TRANSLATION_PORT_NAME });
+    } catch {
+      showErrorPanel({
+        anchor: view.anchor,
+        title: view.title,
+        badge: view.badge,
+        message: "扩展连接已失效，请刷新当前网页后重试。",
+      });
+      return;
+    }
     const request = {
       id: requestId,
       port,
@@ -458,8 +599,27 @@
       intentionalDisconnect: false,
       kind: payload.type,
       view,
+      watchdogTimer: null,
     };
     activeRequest = request;
+
+    if (payload.type === "TRANSLATE_IMAGE") {
+      request.watchdogTimer = setTimeout(() => {
+        if (activeRequest !== request || request.finished) {
+          return;
+        }
+        try {
+          request.port.postMessage({ type: "CANCEL", requestId: request.id });
+        } catch {
+          // The background may already be unavailable.
+        }
+        showRequestError(
+          request,
+          "图片翻译超过 3 分钟仍未完成，已自动停止。请缩小框选区域后重试。",
+          "CLIENT_REQUEST_TIMEOUT",
+        );
+      }, IMAGE_REQUEST_WATCHDOG_MS);
+    }
 
     if (!view.waitForCapture) {
       showLoadingPanel(view);
@@ -480,6 +640,13 @@
     }
   }
 
+  function createRequestId() {
+    if (typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    return `translation-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+  }
+
   function handleTranslationMessage(request, message) {
     if (activeRequest !== request || message?.requestId !== request.id) {
       return;
@@ -493,9 +660,26 @@
       return;
     }
 
+    if (message.type === "PROGRESS") {
+      if (request.kind === "TRANSLATE_IMAGE") {
+        if (ui.panel.hidden) {
+          showLoadingPanel(request.view);
+        }
+        const progressText = IMAGE_PROGRESS_TEXT[message.phase];
+        if (progressText) {
+          ui.status.textContent = progressText;
+        }
+        updateRequestFooter(request, message.image);
+      }
+      return;
+    }
+
     if (message.type === "IMAGE_CAPTURED") {
-      showLoadingPanel(request.view);
-      ui.footer.textContent = request.routeFooter || "硅基流动图片翻译";
+      if (ui.panel.hidden) {
+        showLoadingPanel(request.view);
+      }
+      ui.status.textContent = IMAGE_PROGRESS_TEXT.IMAGE_PREPARED;
+      updateRequestFooter(request, message.image);
       return;
     }
 
@@ -503,6 +687,9 @@
       if (request.view.waitForCapture && ui.panel.hidden) {
         showLoadingPanel(request.view);
         ui.footer.textContent = request.routeFooter || "硅基流动图片翻译";
+      }
+      if (request.kind === "TRANSLATE_IMAGE") {
+        ui.status.textContent = IMAGE_PROGRESS_TEXT.STREAMING;
       }
       request.pendingOutput += typeof message.delta === "string" ? message.delta : "";
       scheduleOutputRender(request);
@@ -512,6 +699,8 @@
     if (message.type === "DONE") {
       flushOutput(request);
       request.finished = true;
+      clearTimeout(request.watchdogTimer);
+      request.watchdogTimer = null;
       ui.spinner.hidden = true;
       ui.status.textContent = "翻译完成";
       ui.status.classList.add("success");
@@ -528,6 +717,35 @@
     if (message.type === "ERROR") {
       showRequestError(request, message.error || "翻译失败，请重试。", message.code);
     }
+  }
+
+  function updateRequestFooter(request, image) {
+    if (
+      Number.isFinite(image?.width) &&
+      Number.isFinite(image?.height) &&
+      Number.isFinite(image?.byteLength) &&
+      image.width > 0 &&
+      image.height > 0 &&
+      image.byteLength > 0
+    ) {
+      request.imageMeta = {
+        width: Math.round(image.width),
+        height: Math.round(image.height),
+        byteLength: Math.round(image.byteLength),
+      };
+    }
+
+    const routeFooter = request.routeFooter || "硅基流动图片翻译";
+    if (!request.imageMeta) {
+      ui.footer.textContent = routeFooter;
+      return;
+    }
+
+    const sizeLabel =
+      request.imageMeta.byteLength >= 1_024 * 1_024
+        ? `${(request.imageMeta.byteLength / (1_024 * 1_024)).toFixed(1)} MB`
+        : `${Math.max(1, Math.round(request.imageMeta.byteLength / 1_024))} KB`;
+    ui.footer.textContent = `${routeFooter} · ${request.imageMeta.width}×${request.imageMeta.height} · ${sizeLabel}`;
   }
 
   function scheduleOutputRender(request) {
@@ -557,6 +775,8 @@
   function showRequestError(request, message, code) {
     clearTimeout(renderTimer);
     renderTimer = null;
+    clearTimeout(request.watchdogTimer);
+    request.watchdogTimer = null;
     request.finished = true;
     request.intentionalDisconnect = true;
     try {
@@ -580,6 +800,7 @@
         code === "DEEPSEEK_KEY_MISSING" ||
         code === "HTTP_401" ||
         code === "HTTP_403",
+      preservePosition: true,
     });
     ui.footer.textContent = request.routeFooter || "翻译服务";
   }
@@ -592,6 +813,8 @@
     }
 
     activeRequest.intentionalDisconnect = true;
+    clearTimeout(activeRequest.watchdogTimer);
+    activeRequest.watchdogTimer = null;
     try {
       activeRequest.port.postMessage({
         type: "CANCEL",
@@ -606,6 +829,7 @@
 
   function showLoadingPanel(view) {
     visibleAnchor = view.anchor;
+    manualPanelPosition = null;
     ui.title.textContent = view.title;
     ui.badge.textContent = view.badge;
     ui.output.textContent = "";
@@ -622,8 +846,18 @@
     positionPanel(view.anchor);
   }
 
-  function showErrorPanel({ anchor, title, badge, message, showSettings = false }) {
+  function showErrorPanel({
+    anchor,
+    title,
+    badge,
+    message,
+    showSettings = false,
+    preservePosition = false,
+  }) {
     visibleAnchor = anchor;
+    if (!preservePosition) {
+      manualPanelPosition = null;
+    }
     ui.title.textContent = title;
     ui.badge.textContent = badge;
     ui.spinner.hidden = true;
@@ -650,6 +884,16 @@
     ui.panel.style.left = `${margin}px`;
     ui.panel.style.top = `${margin}px`;
     const bounds = ui.panel.getBoundingClientRect();
+    if (manualPanelPosition) {
+      manualPanelPosition = clampPanelPosition(
+        manualPanelPosition.left,
+        manualPanelPosition.top,
+        bounds,
+        margin,
+      );
+      applyPanelPosition(manualPanelPosition);
+      return;
+    }
     const maxLeft = Math.max(margin, window.innerWidth - bounds.width - margin);
     const left = Math.min(Math.max(margin, anchor.x), maxLeft);
     let top = anchor.below + 10;
@@ -661,16 +905,34 @@
       top = Math.max(margin, window.innerHeight - bounds.height - margin);
     }
 
-    ui.panel.style.left = `${Math.round(left)}px`;
-    ui.panel.style.top = `${Math.round(top)}px`;
+    applyPanelPosition({ left, top });
+  }
+
+  function clampPanelPosition(left, top, bounds = ui.panel.getBoundingClientRect(), margin = 12) {
+    const maxLeft = Math.max(margin, window.innerWidth - bounds.width - margin);
+    const maxTop = Math.max(margin, window.innerHeight - bounds.height - margin);
+    return {
+      left: Math.min(Math.max(margin, left), maxLeft),
+      top: Math.min(Math.max(margin, top), maxTop),
+    };
+  }
+
+  function applyPanelPosition(position) {
+    ui.panel.style.left = `${Math.round(position.left)}px`;
+    ui.panel.style.top = `${Math.round(position.top)}px`;
   }
 
   function hidePanel() {
+    ui.cancelPanelDrag?.();
     ui.panel.hidden = true;
     visibleAnchor = null;
+    manualPanelPosition = null;
   }
 
   function hidePanelWhileScrolling(event) {
+    if (activeRequest) {
+      return;
+    }
     if (
       event.target === ui.output ||
       event.target === ui.host ||
@@ -709,6 +971,75 @@
     }
   }
 
+  function enablePanelDragging(panel, header, actions) {
+    let dragState = null;
+
+    const cancelPanelDrag = () => {
+      const pointerId = dragState?.pointerId;
+      dragState = null;
+      panel.classList.remove("is-dragging");
+      if (pointerId === undefined) {
+        return;
+      }
+      try {
+        if (header.hasPointerCapture(pointerId)) {
+          header.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // Pointer capture may already have ended.
+      }
+    };
+
+    header.addEventListener("pointerdown", (event) => {
+      if (
+        panel.hidden ||
+        event.button !== 0 ||
+        event.isPrimary === false ||
+        event.composedPath().includes(actions)
+      ) {
+        return;
+      }
+
+      const bounds = panel.getBoundingClientRect();
+      dragState = {
+        pointerId: event.pointerId,
+        offsetX: event.clientX - bounds.left,
+        offsetY: event.clientY - bounds.top,
+      };
+      panel.classList.add("is-dragging");
+      try {
+        header.setPointerCapture(event.pointerId);
+      } catch {
+        // Continue without capture on older or unusual document contexts.
+      }
+      event.preventDefault();
+    });
+
+    header.addEventListener("pointermove", (event) => {
+      if (!dragState || event.pointerId !== dragState.pointerId) {
+        return;
+      }
+
+      manualPanelPosition = clampPanelPosition(
+        event.clientX - dragState.offsetX,
+        event.clientY - dragState.offsetY,
+      );
+      applyPanelPosition(manualPanelPosition);
+      event.preventDefault();
+    });
+
+    const finishPointerDrag = (event) => {
+      if (dragState && event.pointerId === dragState.pointerId) {
+        cancelPanelDrag();
+      }
+    };
+    header.addEventListener("pointerup", finishPointerDrag);
+    header.addEventListener("pointercancel", finishPointerDrag);
+    header.addEventListener("lostpointercapture", finishPointerDrag);
+
+    return cancelPanelDrag;
+  }
+
   function createTranslatorUi() {
     const host = document.createElement("div");
     host.id = "siliconflow-selection-translator-root";
@@ -722,12 +1053,15 @@
     panel.setAttribute("aria-labelledby", "sf-translator-dialog-title");
 
     const header = createElement("header", "panel-header");
+    header.title = "按住标题栏拖动悬浮窗";
     const brand = createElement("div", "brand");
+    const dragGrip = createElement("span", "drag-grip", "⠿");
+    dragGrip.setAttribute("aria-hidden", "true");
     const mark = createElement("span", "brand-mark", "译");
     const title = createElement("strong", "panel-title", "翻译");
     title.id = "sf-translator-dialog-title";
     const badge = createElement("span", "language-badge", "自动");
-    brand.append(mark, title, badge);
+    brand.append(dragGrip, mark, title, badge);
 
     const actions = createElement("div", "header-actions");
     const copyButton = createElement("button", "text-button", "复制");
@@ -772,6 +1106,7 @@
 
     shadow.append(style, panel, overlay);
     (document.documentElement || document.body).append(host);
+    const cancelPanelDrag = enablePanelDragging(panel, header, actions);
 
     closeButton.addEventListener("click", () => {
       cancelActiveRequest();
@@ -795,6 +1130,7 @@
       footer,
       overlay,
       selectionBox,
+      cancelPanelDrag,
       cancelImageSelection: null,
     };
   }
@@ -867,6 +1203,12 @@
         min-height: 54px;
         padding: 10px 12px 10px 14px;
         border-bottom: 1px solid #edf0f4;
+        cursor: grab;
+        touch-action: none;
+        user-select: none;
+      }
+      .translator-panel.is-dragging .panel-header {
+        cursor: grabbing;
       }
       .brand,
       .header-actions,
@@ -878,6 +1220,13 @@
       .brand {
         min-width: 0;
         gap: 8px;
+      }
+      .drag-grip {
+        flex: 0 0 auto;
+        margin-right: -3px;
+        color: #a2abbb;
+        font-size: 16px;
+        line-height: 1;
       }
       .brand-mark {
         display: inline-grid;
@@ -910,6 +1259,10 @@
       }
       .header-actions {
         gap: 4px;
+        cursor: default;
+      }
+      .header-actions button {
+        touch-action: manipulation;
       }
       button {
         appearance: none;

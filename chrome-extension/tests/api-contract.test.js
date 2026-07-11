@@ -106,6 +106,18 @@ test("SSE 解析器忽略 usage 空 choices 帧", () => {
   assert.equal(result.done, true);
 });
 
+test("SSE 心跳与 role 空帧不会被误判为有效译文", () => {
+  const output = [];
+  const result = consumeSseEvents(
+    ': keep-alive\n\ndata: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n',
+    (delta) => output.push(delta),
+  );
+
+  assert.deepEqual(output, []);
+  assert.equal(result.done, false);
+  assert.equal(result.remainder, "");
+});
+
 test("SSE 解析器暴露流内错误", () => {
   assert.throws(
     () =>

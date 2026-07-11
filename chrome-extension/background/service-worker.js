@@ -9,15 +9,28 @@ import {
   TEXT_SYSTEM_PROMPT,
 } from "../shared/prompts.js";
 import { buildChatRequestBody, consumeSseEvents } from "../shared/api-contract.js";
+import {
+  calculateImageOutputSize,
+  IMAGE_JPEG_QUALITIES,
+  IMAGE_LIMITS,
+} from "../shared/image-pipeline.js";
+import {
+  classifyMessageSender,
+  isNamedExtensionPage,
+  SENDER_KIND,
+} from "../shared/message-sender.js";
 import { chooseTextProvider } from "../shared/routing.js";
 
 const IMAGE_MENU_ID = "translate-image-with-siliconflow";
 const TRANSLATION_PORT_NAME = "multi-provider-translation";
 const MAX_TEXT_LENGTH = 20_000;
-const MAX_IMAGE_SIDE = 2_560;
-const MAX_IMAGE_PIXELS = 5_500_000;
+const IMAGE_PROCESSING_TIMEOUT_MS = 20_000;
 const STREAM_IDLE_TIMEOUT_MS = 45_000;
-const RESPONSE_HEADER_TIMEOUT_MS = 45_000;
+const RESPONSE_HEADER_TIMEOUT_MS = 60_000;
+const FIRST_CONTENT_TIMEOUT_MS = 120_000;
+const REQUEST_TOTAL_TIMEOUT_MS = 180_000;
+const ERROR_BODY_TIMEOUT_MS = 10_000;
+const MAX_ERROR_BODY_BYTES = 64 * 1_024;
 const TEXT_PROVIDER_DEEPSEEK_FIRST = "deepseek_first";
 const TEXT_PROVIDER_SILICONFLOW = "siliconflow";
 
@@ -48,7 +61,10 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== TRANSLATION_PORT_NAME || !isTrustedSender(port.sender)) {
+  if (
+    port.name !== TRANSLATION_PORT_NAME ||
+    classifyMessageSender(port.sender, chrome.runtime.id) !== SENDER_KIND.CONTENT_SCRIPT
+  ) {
     port.disconnect();
     return;
   }
@@ -67,27 +83,36 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!isTrustedSender(sender) || !message || typeof message !== "object") {
+  const senderKind = classifyMessageSender(sender, chrome.runtime.id);
+  const isOptionsPage = isNamedExtensionPage(
+    sender,
+    chrome.runtime.id,
+    "options/options.html",
+  );
+  const isPopupPage = isNamedExtensionPage(sender, chrome.runtime.id, "popup/popup.html");
+  if (senderKind === SENDER_KIND.UNTRUSTED || !message || typeof message !== "object") {
     sendResponse({ ok: false, error: "无效请求。" });
     return false;
   }
 
   if (message.type === "GET_PUBLIC_SETTINGS") {
-    void getPublicSettings().then((settings) => {
-      if (sender.tab) {
-        sendResponse({
-          ok: settings.ok,
-          autoTranslate: settings.autoTranslate,
-          hasApiKey: settings.hasApiKey,
-        });
-        return;
-      }
-      sendResponse(settings);
-    });
+    void getPublicSettings()
+      .then((settings) => {
+        if (!isOptionsPage && !isPopupPage) {
+          sendResponse({
+            ok: settings.ok,
+            autoTranslate: settings.autoTranslate,
+            hasApiKey: settings.hasApiKey,
+          });
+          return;
+        }
+        sendResponse(settings);
+      })
+      .catch(() => sendResponse({ ok: false, error: "读取设置失败。" }));
     return true;
   }
 
-  if (message.type === "SET_AUTO_TRANSLATE" && !sender.tab) {
+  if (message.type === "SET_AUTO_TRANSLATE" && isPopupPage) {
     const autoTranslate = Boolean(message.autoTranslate);
     void chrome.storage.local
       .set({ autoTranslate })
@@ -96,7 +121,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
-  if (message.type === "TEST_CONNECTION" && !sender.tab) {
+  if (message.type === "TEST_CONNECTION" && isOptionsPage) {
     void testConnection(message.provider)
       .then((result) => sendResponse({ ok: true, result }))
       .catch((error) => sendResponse({ ok: false, error: toUserMessage(error) }));
@@ -162,10 +187,6 @@ async function migrateLegacySettings() {
   } catch {
     // Migration is best-effort; read helpers still understand the legacy key.
   }
-}
-
-function isTrustedSender(sender) {
-  return sender?.id === chrome.runtime.id;
 }
 
 async function getPublicSettings() {
@@ -262,6 +283,20 @@ async function handlePortMessage(port, state, message) {
   const controller = new AbortController();
   state.controller = controller;
   state.requestId = requestId;
+  let requestTimedOut = false;
+  const requestTimer = setTimeout(() => {
+    requestTimedOut = true;
+    controller.abort("request-total-timeout");
+  }, REQUEST_TOTAL_TIMEOUT_MS);
+
+  const postProgress = (phase, details = {}) => {
+    safePortPost(port, {
+      type: "PROGRESS",
+      requestId,
+      phase,
+      ...details,
+    });
+  };
 
   try {
     const route =
@@ -281,14 +316,26 @@ async function handlePortMessage(port, state, message) {
     if (message.type === "TRANSLATE_TEXT") {
       messages = createTextMessages(message);
     } else {
-      messages = await createImageMessages(port.sender, message, controller.signal);
-      safePortPost(port, { type: "IMAGE_CAPTURED", requestId });
+      const imageRequest = await createImageMessages(
+        port.sender,
+        message,
+        controller.signal,
+        postProgress,
+      );
+      messages = imageRequest.messages;
+      safePortPost(port, {
+        type: "IMAGE_CAPTURED",
+        requestId,
+        image: imageRequest.image,
+      });
     }
 
     await streamChatCompletion({
       route,
       messages,
       signal: controller.signal,
+      requestKind: message.type === "TRANSLATE_IMAGE" ? "image" : "text",
+      onProgress: postProgress,
       onDelta(delta) {
         safePortPost(port, {
           type: "DELTA",
@@ -300,10 +347,18 @@ async function handlePortMessage(port, state, message) {
 
     safePortPost(port, { type: "DONE", requestId });
   } catch (error) {
-    if (!isAbortError(error)) {
+    if (requestTimedOut) {
+      postPortError(
+        port,
+        requestId,
+        "图片或文本翻译超过 3 分钟仍未完成，已自动停止。请缩小内容后重试。",
+        "REQUEST_TOTAL_TIMEOUT",
+      );
+    } else if (!controller.signal.aborted) {
       postPortError(port, requestId, toUserMessage(error), error.code || "REQUEST_FAILED");
     }
   } finally {
+    clearTimeout(requestTimer);
     if (state.controller === controller) {
       state.controller = null;
       state.requestId = "";
@@ -343,38 +398,66 @@ function createTextMessages(message) {
   ];
 }
 
-async function createImageMessages(sender, message, signal) {
+async function createImageMessages(sender, message, signal, onProgress) {
   if (!sender?.tab?.id || !Number.isInteger(sender.tab.windowId)) {
     throw createAppError("无法确定需要截图的标签页。", "CAPTURE_UNAVAILABLE");
   }
 
-  const dataUrl = await captureAndCropImage({
-    tabId: sender.tab.id,
-    windowId: sender.tab.windowId,
-    rect: message.rect,
-    viewport: message.viewport,
-    signal,
+  const image = await runWithDeadline(
+    (operationSignal) =>
+      captureAndCropImage({
+        tabId: sender.tab.id,
+        windowId: sender.tab.windowId,
+        rect: message.rect,
+        viewport: message.viewport,
+        signal: operationSignal,
+        onProgress,
+      }),
+    {
+      signal,
+      timeoutMs: IMAGE_PROCESSING_TIMEOUT_MS,
+      createTimeoutError: () =>
+        createAppError(
+          "截图或图片处理超过 20 秒，请缩小框选区域后重试。",
+          "IMAGE_PROCESSING_TIMEOUT",
+        ),
+    },
+  );
+
+  onProgress("IMAGE_PREPARED", {
+    image: {
+      width: image.width,
+      height: image.height,
+      byteLength: image.byteLength,
+    },
   });
 
-  return [
-    { role: "system", content: IMAGE_SYSTEM_PROMPT },
-    {
-      role: "user",
-      content: [
-        {
-          type: "image_url",
-          image_url: {
-            url: dataUrl,
-            detail: "high",
-          },
-        },
-        { type: "text", text: IMAGE_USER_PROMPT },
-      ],
+  return {
+    image: {
+      width: image.width,
+      height: image.height,
+      byteLength: image.byteLength,
     },
-  ];
+    messages: [
+      { role: "system", content: IMAGE_SYSTEM_PROMPT },
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: {
+              url: image.dataUrl,
+              detail: "high",
+            },
+          },
+          { type: "text", text: IMAGE_USER_PROMPT },
+        ],
+      },
+    ],
+  };
 }
 
-async function captureAndCropImage({ tabId, windowId, rect, viewport, signal }) {
+async function captureAndCropImage({ tabId, windowId, rect, viewport, signal, onProgress }) {
   const normalizedRect = validateCaptureRect(rect, viewport);
   if (!normalizedRect) {
     throw createAppError("图片区域无效，请重新框选。", "INVALID_IMAGE_RECT");
@@ -401,17 +484,25 @@ async function captureAndCropImage({ tabId, windowId, rect, viewport, signal }) 
   if (signal.aborted) {
     throw new DOMException("Aborted", "AbortError");
   }
+  onProgress("SCREENSHOT_CAPTURED");
 
   try {
-    const screenshotBlob = await (await fetch(screenshotUrl)).blob();
+    const screenshotBlob = await (await fetch(screenshotUrl, { signal })).blob();
+    if (signal.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
     const bitmap = await createImageBitmap(screenshotBlob);
     try {
-      return await cropBitmapToDataUrl(bitmap, normalizedRect, viewport);
+      const image = await cropBitmapToDataUrl(bitmap, normalizedRect, viewport);
+      if (signal.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      return image;
     } finally {
       bitmap.close();
     }
   } catch (error) {
-    if (isAbortError(error)) {
+    if (isAbortError(error) || typeof error?.code === "string") {
       throw error;
     }
     throw createAppError("图片处理失败，请缩小框选区域后重试。", "IMAGE_PROCESSING_FAILED");
@@ -468,11 +559,10 @@ async function cropBitmapToDataUrl(bitmap, rect, viewport) {
     Math.max(1, Math.round(rect.height * scaleY)),
   );
 
-  const sideScale = Math.min(1, MAX_IMAGE_SIDE / Math.max(sourceWidth, sourceHeight));
-  const pixelScale = Math.min(1, Math.sqrt(MAX_IMAGE_PIXELS / (sourceWidth * sourceHeight)));
-  const outputScale = Math.min(sideScale, pixelScale);
-  const outputWidth = Math.max(1, Math.round(sourceWidth * outputScale));
-  const outputHeight = Math.max(1, Math.round(sourceHeight * outputScale));
+  const { width: outputWidth, height: outputHeight } = calculateImageOutputSize(
+    sourceWidth,
+    sourceHeight,
+  );
 
   const canvas = new OffscreenCanvas(outputWidth, outputHeight);
   const context = canvas.getContext("2d", { alpha: false });
@@ -494,23 +584,44 @@ async function cropBitmapToDataUrl(bitmap, rect, viewport) {
     outputHeight,
   );
 
-  const outputBlob = await canvas.convertToBlob({
-    type: "image/jpeg",
-    quality: 0.93,
-  });
-  return blobToDataUrl(outputBlob);
+  const outputBlob = await encodeCanvasWithinLimit(canvas);
+  return {
+    dataUrl: await blobToDataUrl(outputBlob),
+    width: outputWidth,
+    height: outputHeight,
+    byteLength: outputBlob.size,
+  };
+}
+
+async function encodeCanvasWithinLimit(canvas) {
+  let outputBlob = null;
+
+  for (const quality of IMAGE_JPEG_QUALITIES) {
+    outputBlob = await canvas.convertToBlob({
+      type: "image/jpeg",
+      quality,
+    });
+    if (outputBlob.size <= IMAGE_LIMITS.maxEncodedBytes) {
+      return outputBlob;
+    }
+  }
+
+  throw createAppError(
+    "所选区域压缩后仍然过大，请只框选需要翻译的文字区域。",
+    "IMAGE_TOO_LARGE",
+  );
 }
 
 async function blobToDataUrl(blob) {
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const chunkSize = 0x8000;
-  let binary = "";
+  const chunks = [];
 
   for (let offset = 0; offset < bytes.length; offset += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    chunks.push(String.fromCharCode(...bytes.subarray(offset, offset + chunkSize)));
   }
 
-  return `data:${blob.type || "image/jpeg"};base64,${btoa(binary)}`;
+  return `data:${blob.type || "image/jpeg"};base64,${btoa(chunks.join(""))}`;
 }
 
 async function loadProviderSettings() {
@@ -621,7 +732,14 @@ async function testConnection(provider) {
   return `${route.providerLabel} / ${route.model}：${output.trim()}`;
 }
 
-async function streamChatCompletion({ route, messages, signal, onDelta }) {
+async function streamChatCompletion({
+  route,
+  messages,
+  signal,
+  onDelta,
+  onProgress = () => undefined,
+  requestKind = "text",
+}) {
   const requestController = new AbortController();
   const forwardAbort = () => requestController.abort(signal.reason || "cancelled");
   if (signal.aborted) {
@@ -632,12 +750,22 @@ async function streamChatCompletion({ route, messages, signal, onDelta }) {
 
   let response;
   let reader = null;
+  let phase = "preparing";
   let headerTimedOut = false;
+  let firstContentTimedOut = false;
   let streamTimedOut = false;
+  let totalTimedOut = false;
   let headerTimer = null;
+  let firstContentTimer = null;
   let idleTimer = null;
+  let totalTimer = null;
 
   try {
+    totalTimer = setTimeout(() => {
+      totalTimedOut = true;
+      requestController.abort("request-total-timeout");
+    }, REQUEST_TOTAL_TIMEOUT_MS);
+
     headerTimer = setTimeout(() => {
       headerTimedOut = true;
       requestController.abort("response-header-timeout");
@@ -648,37 +776,22 @@ async function streamChatCompletion({ route, messages, signal, onDelta }) {
       model: route.model,
       messages,
     });
+    const serializedBody = JSON.stringify(requestBody);
+    phase = "requesting";
+    onProgress("REQUEST_SENT");
 
-    try {
-      response = await fetch(route.apiUrl, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${route.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(requestBody),
-        signal: requestController.signal,
-      });
-    } catch (error) {
-      if (signal.aborted) {
-        throw new DOMException("Aborted", "AbortError");
-      }
-      if (headerTimedOut) {
-        throw createAppError(
-          `${route.providerLabel} 长时间未响应，请稍后重试。`,
-          "RESPONSE_HEADER_TIMEOUT",
-        );
-      }
-      if (isAbortError(error)) {
-        throw error;
-      }
-      throw createAppError(
-        `无法连接${route.providerLabel}，请检查网络后重试。`,
-        "NETWORK_ERROR",
-      );
-    }
+    response = await fetch(route.apiUrl, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${route.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: serializedBody,
+      signal: requestController.signal,
+    });
     clearTimeout(headerTimer);
     headerTimer = null;
+    phase = "response";
 
     if (!response.ok) {
       const detail = await readApiError(response);
@@ -697,25 +810,37 @@ async function streamChatCompletion({ route, messages, signal, onDelta }) {
       throw createAppError("服务未返回可读取的流式响应。", "EMPTY_STREAM");
     }
 
+    onProgress("RESPONSE_STARTED");
+    phase = "streaming";
     reader = response.body.getReader();
     const decoder = new TextDecoder("utf-8");
     let buffer = "";
     let receivedDone = false;
     let receivedContent = false;
 
-    const emitDelta = (delta) => {
-      receivedContent = true;
-      onDelta(delta);
-    };
     const resetIdleTimer = () => {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         streamTimedOut = true;
-        void reader.cancel("stream-timeout").catch(() => undefined);
+        requestController.abort("stream-idle-timeout");
       }, STREAM_IDLE_TIMEOUT_MS);
     };
+    const emitDelta = (delta) => {
+      if (!receivedContent) {
+        receivedContent = true;
+        clearTimeout(firstContentTimer);
+        firstContentTimer = null;
+        onProgress("STREAMING");
+      }
+      onDelta(delta);
+      resetIdleTimer();
+    };
 
-    resetIdleTimer();
+    firstContentTimer = setTimeout(() => {
+      firstContentTimedOut = true;
+      requestController.abort("first-content-timeout");
+    }, FIRST_CONTENT_TIMEOUT_MS);
+
     while (!receivedDone) {
       const { done, value } = await reader.read();
       if (done) {
@@ -723,7 +848,6 @@ async function streamChatCompletion({ route, messages, signal, onDelta }) {
         break;
       }
 
-      resetIdleTimer();
       buffer += decoder.decode(value, { stream: true });
       const parsed = consumeSseEvents(buffer, emitDelta);
       buffer = parsed.remainder;
@@ -734,8 +858,20 @@ async function streamChatCompletion({ route, messages, signal, onDelta }) {
       const parsed = consumeSseEvents(`${buffer}\n\n`, emitDelta);
       receivedDone = parsed.done;
     }
+    if (totalTimedOut) {
+      throw createAppError(
+        `${requestKind === "image" ? "图片翻译" : "翻译请求"}总时长超过 3 分钟，已自动停止。`,
+        "REQUEST_TOTAL_TIMEOUT",
+      );
+    }
+    if (firstContentTimedOut) {
+      throw createAppError(
+        `${route.providerLabel}已建立连接，但模型长时间没有开始返回译文。请重试或切换较小模型。`,
+        "FIRST_CONTENT_TIMEOUT",
+      );
+    }
     if (streamTimedOut) {
-      throw createAppError("翻译服务响应超时，请重新翻译。", "STREAM_TIMEOUT");
+      throw createAppError("译文输出超过 45 秒没有新内容，已自动停止。", "STREAM_TIMEOUT");
     }
     if (!receivedDone) {
       throw createAppError("流式响应提前结束，译文可能不完整，请重试。", "INCOMPLETE_STREAM");
@@ -744,16 +880,48 @@ async function streamChatCompletion({ route, messages, signal, onDelta }) {
       throw createAppError("模型没有返回译文，请重新翻译。", "EMPTY_COMPLETION");
     }
   } catch (error) {
-    if (error?.code) {
+    if (signal.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+    if (totalTimedOut) {
+      throw createAppError(
+        `${requestKind === "image" ? "图片翻译" : "翻译请求"}总时长超过 3 分钟，已自动停止。`,
+        "REQUEST_TOTAL_TIMEOUT",
+      );
+    }
+    if (headerTimedOut) {
+      throw createAppError(
+        `${route.providerLabel}在 60 秒内没有响应，请检查网络或稍后重试。`,
+        "RESPONSE_HEADER_TIMEOUT",
+      );
+    }
+    if (firstContentTimedOut) {
+      throw createAppError(
+        `${route.providerLabel}已建立连接，但模型长时间没有开始返回译文。请重试或切换较小模型。`,
+        "FIRST_CONTENT_TIMEOUT",
+      );
+    }
+    if (streamTimedOut) {
+      throw createAppError("译文输出超过 45 秒没有新内容，已自动停止。", "STREAM_TIMEOUT");
+    }
+    if (typeof error?.code === "string") {
       throw error;
     }
-    if (isAbortError(error) || signal.aborted) {
-      throw new DOMException("Aborted", "AbortError");
+    if (isAbortError(error)) {
+      throw createAppError("翻译请求意外中止，请重新翻译。", "REQUEST_ABORTED");
+    }
+    if (phase === "requesting") {
+      throw createAppError(
+        `无法连接${route.providerLabel}，请检查网络后重试。`,
+        "NETWORK_ERROR",
+      );
     }
     throw createAppError("流式响应中断，请重新翻译。", "STREAM_INTERRUPTED");
   } finally {
     clearTimeout(headerTimer);
+    clearTimeout(firstContentTimer);
     clearTimeout(idleTimer);
+    clearTimeout(totalTimer);
     signal.removeEventListener("abort", forwardAbort);
     try {
       reader?.releaseLock();
@@ -766,14 +934,63 @@ async function streamChatCompletion({ route, messages, signal, onDelta }) {
 async function readApiError(response) {
   let text = "";
   try {
-    text = await response.text();
+    text = await readResponseTextLimited(response);
     if (!text) {
       return "";
     }
     const parsed = JSON.parse(text);
     return parsed.error?.message || parsed.message || "";
-  } catch {
+  } catch (error) {
+    if (typeof error?.code === "string") {
+      throw error;
+    }
     return text.slice(0, 240);
+  }
+}
+
+async function readResponseTextLimited(response) {
+  if (!response.body) {
+    return "";
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  const chunks = [];
+  let receivedBytes = 0;
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      void reader.cancel("error-body-timeout").catch(() => undefined);
+      reject(createAppError("读取翻译服务错误响应超时。", "ERROR_BODY_TIMEOUT"));
+    }, ERROR_BODY_TIMEOUT_MS);
+  });
+
+  try {
+    while (receivedBytes < MAX_ERROR_BODY_BYTES) {
+      const { done, value } = await Promise.race([reader.read(), timeout]);
+      if (done) {
+        break;
+      }
+      const remaining = MAX_ERROR_BODY_BYTES - receivedBytes;
+      const limitedValue = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      receivedBytes += limitedValue.byteLength;
+      chunks.push(decoder.decode(limitedValue, { stream: true }));
+      if (limitedValue.byteLength !== value.byteLength) {
+        break;
+      }
+    }
+    chunks.push(decoder.decode());
+    if (receivedBytes >= MAX_ERROR_BODY_BYTES) {
+      void reader.cancel("error-body-limit").catch(() => undefined);
+    }
+    return chunks.join("");
+  } finally {
+    clearTimeout(timeoutId);
+    try {
+      reader.releaseLock();
+    } catch {
+      // Cancellation can release the lock first.
+    }
   }
 }
 
@@ -810,6 +1027,45 @@ function createHttpError(status, detail, providerLabel = "翻译服务") {
   );
 }
 
+function runWithDeadline(operation, { signal, timeoutMs, createTimeoutError }) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId = null;
+    const operationController = new AbortController();
+
+    const finish = (callback, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeoutId);
+      signal.removeEventListener("abort", handleAbort);
+      callback(value);
+    };
+    const handleAbort = () => {
+      operationController.abort(signal.reason || "cancelled");
+      finish(reject, new DOMException("Aborted", "AbortError"));
+    };
+
+    if (signal.aborted) {
+      handleAbort();
+      return;
+    }
+
+    signal.addEventListener("abort", handleAbort, { once: true });
+    timeoutId = setTimeout(() => {
+      operationController.abort("operation-timeout");
+      finish(reject, createTimeoutError());
+    }, timeoutMs);
+    Promise.resolve()
+      .then(() => operation(operationController.signal))
+      .then(
+        (value) => finish(resolve, value),
+        (error) => finish(reject, error),
+      );
+  });
+}
+
 function createAppError(message, code) {
   const error = new Error(message);
   error.code = code;
@@ -821,8 +1077,11 @@ function isAbortError(error) {
 }
 
 function toUserMessage(error) {
-  if (error?.code && typeof error.message === "string") {
+  if (typeof error?.code === "string" && typeof error.message === "string") {
     return error.message;
+  }
+  if (isAbortError(error)) {
+    return "翻译请求意外中止，请重新翻译。";
   }
   return "翻译失败，请稍后重试。";
 }

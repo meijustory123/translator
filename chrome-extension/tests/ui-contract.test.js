@@ -8,6 +8,8 @@ const extensionRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("Manifest 引用的本地入口文件全部存在", () => {
   const manifest = JSON.parse(readFileSync(resolve(extensionRoot, "manifest.json"), "utf8"));
+  const packageJson = JSON.parse(readFileSync(resolve(extensionRoot, "package.json"), "utf8"));
+  const contentScript = readFileSync(resolve(extensionRoot, "content/content.js"), "utf8");
   const referencedFiles = [
     manifest.background.service_worker,
     manifest.action.default_popup,
@@ -18,10 +20,21 @@ test("Manifest 引用的本地入口文件全部存在", () => {
   for (const file of referencedFiles) {
     assert.equal(existsSync(resolve(extensionRoot, file)), true, `缺少 ${file}`);
   }
+  assert.deepEqual(manifest.permissions.sort(), [
+    "activeTab",
+    "contextMenus",
+    "scripting",
+    "storage",
+  ]);
   assert.deepEqual(manifest.host_permissions.sort(), [
     "https://api.deepseek.com/*",
     "https://api.siliconflow.cn/*",
   ]);
+  assert.equal(packageJson.version, manifest.version);
+  assert.match(
+    contentScript,
+    new RegExp(`CONTENT_SCRIPT_VERSION = ["']${escapeRegExp(manifest.version)}["']`, "u"),
+  );
 });
 
 test("设置页脚本引用的 ID 都存在于 HTML", () => {
@@ -44,4 +57,8 @@ function assertScriptSelectorsExist(scriptPath, htmlPath) {
   for (const id of referencedIds) {
     assert.equal(ids.has(id), true, `${scriptPath} 引用了不存在的 #${id}`);
   }
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
