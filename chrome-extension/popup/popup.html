@@ -13,7 +13,7 @@
         <span class="brand-mark" aria-hidden="true">译</span>
         <div>
           <h1>多模型划译助手</h1>
-          <p>划词、段落与图片，一处完成</p>
+          <p>划词、图片与 PDF，一处完成</p>
         </div>
       </header>
 
@@ -60,10 +60,18 @@
         </span>
       </button>
 
+      <button id="pdfTranslate" class="secondary-action" type="button">
+        <span class="action-icon" aria-hidden="true">PDF</span>
+        <span>
+          <strong>翻译 PDF</strong>
+          <small>打开独立工作台，选择本地 PDF</small>
+        </span>
+      </button>
+
       <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
 
       <footer>
-        也可在网页图片上右键，选择“翻译这张图片”
+        PDF 文件只在本地解析，不会上传原文件
       </footer>
     </main>
   </body>

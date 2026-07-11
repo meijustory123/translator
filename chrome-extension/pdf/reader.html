@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>PDF 翻译工作台</title>
+    <link rel="stylesheet" href="reader.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="app-header">
+        <a class="brand" href="#importPanel" aria-label="返回 PDF 翻译工作台顶部">
+          <span class="brand-mark" aria-hidden="true">译</span>
+          <span>
+            <strong>PDF 翻译工作台</strong>
+            <small>本地解析，分批翻译</small>
+          </span>
+        </a>
+        <div class="header-actions">
+          <p id="documentStatus" class="document-status" role="status" aria-live="polite">
+            等待选择 PDF
+          </p>
+          <button id="settingsButton" class="button button-quiet" type="button">
+            <span aria-hidden="true">⚙</span>
+            翻译设置
+          </button>
+        </div>
+      </header>
+
+      <main class="main-content">
+        <section id="importPanel" class="panel import-panel" aria-labelledby="importTitle">
+          <div class="section-heading">
+            <span class="step-number" aria-hidden="true">1</span>
+            <div>
+              <h1 id="importTitle">选择本地 PDF</h1>
+              <p>文件仅在浏览器中打开和分析，原始 PDF 不会被上传。</p>
+            </div>
+          </div>
+
+          <div id="dropZone" class="drop-zone" tabindex="0" role="button" aria-controls="pdfFileInput">
+            <span class="drop-icon" aria-hidden="true">PDF</span>
+            <strong>将 PDF 拖到这里</strong>
+            <span>或</span>
+            <label class="button button-primary" for="pdfFileInput">选择 PDF 文件</label>
+            <input id="pdfFileInput" type="file" accept="application/pdf,.pdf" />
+            <small>单个文件最大 200 MiB，最多 500 页</small>
+          </div>
+
+          <div id="fileSummary" class="file-summary" hidden>
+            <span class="file-badge" aria-hidden="true">PDF</span>
+            <div class="file-copy">
+              <strong id="fileName">尚未选择文件</strong>
+              <span id="fileMeta">—</span>
+            </div>
+            <button id="changeFileButton" class="button button-quiet" type="button">更换文件</button>
+          </div>
+
+          <div id="passwordPanel" class="password-panel" hidden>
+            <div>
+              <strong>此 PDF 受密码保护</strong>
+              <p>密码只用于本地解密，不会保存或发送。</p>
+            </div>
+            <form id="passwordForm" class="password-form">
+              <label for="pdfPassword">打开密码</label>
+              <div class="password-row">
+                <input
+                  id="pdfPassword"
+                  type="password"
+                  autocomplete="off"
+                  spellcheck="false"
+                  placeholder="输入 PDF 密码"
+                />
+                <button id="unlockPdfButton" class="button button-secondary" type="submit">解锁并分析</button>
+              </div>
+              <p id="passwordFeedback" class="field-feedback" role="status" aria-live="polite"></p>
+            </form>
+          </div>
+        </section>
+
+        <section id="analysisPanel" class="panel analysis-panel" aria-labelledby="analysisTitle" hidden>
+          <div class="section-heading section-heading-spread">
+            <div class="heading-with-step">
+              <span class="step-number" aria-hidden="true">2</span>
+              <div>
+                <h2 id="analysisTitle">确认分析结果</h2>
+                <p id="analysisStatus" role="status" aria-live="polite">正在分析页面结构…</p>
+              </div>
+            </div>
+            <span id="analysisSpinner" class="spinner" aria-hidden="true"></span>
+          </div>
+
+          <div class="summary-grid" aria-label="PDF 分析摘要">
+            <div class="summary-item summary-primary">
+              <span>总页数</span>
+              <strong id="pageCount">—</strong>
+            </div>
+            <div class="summary-item">
+              <span>文本页</span>
+              <strong id="textPageCount">—</strong>
+            </div>
+            <div class="summary-item">
+              <span>扫描页</span>
+              <strong id="scanPageCount">—</strong>
+            </div>
+            <div class="summary-item">
+              <span>混合页</span>
+              <strong id="mixedPageCount">—</strong>
+            </div>
+            <div class="summary-item">
+              <span>文本块</span>
+              <strong id="textBlockCount">—</strong>
+            </div>
+          </div>
+
+          <div class="provider-summary">
+            <span class="provider-icon" aria-hidden="true">⇄</span>
+            <div>
+              <strong>预计发送方式</strong>
+              <p id="providerSummary">完成分析后显示将发送的文本块及供应商；扫描页会跳过。</p>
+            </div>
+          </div>
+
+          <label class="privacy-confirm" for="privacyConfirm">
+            <input id="privacyConfirm" type="checkbox" />
+            <span>
+              <strong>我已了解会发送哪些内容</strong>
+              <small>
+                扩展不会上传原始 PDF 文件；翻译全部页面时，供应商仍会分批收到足以覆盖全文的文本。
+                当前版本仅发送提取出的文本块；扫描页会被标记并跳过，不会发送页面像素。请勿处理不应发送给第三方的敏感文档。
+              </small>
+            </span>
+          </label>
+
+          <div class="analysis-actions">
+            <button id="startTranslationButton" class="button button-primary button-large" type="button" disabled>
+              开始翻译
+            </button>
+          </div>
+        </section>
+
+        <section id="workspacePanel" class="workspace-panel" aria-labelledby="workspaceTitle" hidden>
+          <div class="workspace-toolbar panel">
+            <div class="progress-area">
+              <div class="progress-heading">
+                <div>
+                  <h2 id="workspaceTitle">翻译进度</h2>
+                  <p id="overallProgressText" role="status" aria-live="polite">准备开始</p>
+                </div>
+                <strong><span id="completedPageCount">0</span> / <span id="totalPageCount">0</span> 页</strong>
+              </div>
+              <progress id="overallProgress" max="100" value="0">0%</progress>
+            </div>
+
+            <div class="job-actions" aria-label="翻译任务控制">
+              <button id="pauseTranslationButton" class="button button-secondary" type="button">暂停</button>
+              <button id="resumeTranslationButton" class="button button-secondary" type="button" hidden>继续</button>
+              <button id="cancelTranslationButton" class="button button-danger" type="button">取消</button>
+            </div>
+          </div>
+
+          <div class="reading-toolbar panel" aria-label="阅读与导出工具">
+            <div id="viewSwitcher" class="segmented-control" role="group" aria-label="阅读视图">
+              <button
+                id="originalViewButton"
+                class="view-button"
+                type="button"
+                aria-pressed="false"
+                data-view="original"
+              >
+                仅原文
+              </button>
+              <button
+                id="translatedViewButton"
+                class="view-button"
+                type="button"
+                aria-pressed="false"
+                data-view="translated"
+              >
+                仅译文
+              </button>
+              <button
+                id="bilingualViewButton"
+                class="view-button is-active"
+                type="button"
+                aria-pressed="true"
+                data-view="bilingual"
+              >
+                双语对照
+              </button>
+            </div>
+
+            <div class="export-actions">
+              <button id="exportHtmlButton" class="button button-secondary" type="button" disabled>
+                导出双语 HTML
+              </button>
+              <button id="printButton" class="button button-primary" type="button" disabled>
+                打印 / 存为 PDF
+              </button>
+            </div>
+          </div>
+
+          <div id="pagesContainer" class="pages-container" data-view="bilingual" aria-live="polite">
+            <div id="pagesEmptyState" class="pages-empty-state">
+              <strong>页面将在这里逐页显示</strong>
+              <span>翻译开始后，可查看每页状态并单独重试失败页面。</span>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="pageTemplate">
+      <article class="page-card" data-page-number="">
+        <header class="page-header">
+          <div>
+            <strong data-role="page-title">第 — 页</strong>
+            <span class="page-type" data-role="page-type">等待分析</span>
+          </div>
+          <div class="page-status-group">
+            <span class="page-status" data-role="page-status" data-status="pending" role="status">等待翻译</span>
+            <button class="button button-small button-secondary" data-role="retry-page" type="button" hidden>
+              重试本页
+            </button>
+          </div>
+        </header>
+        <div class="page-columns">
+          <section class="page-pane original-pane" data-role="original-pane" aria-label="PDF 原页">
+            <div class="pane-heading">
+              <strong>原文</strong>
+              <span data-role="render-status">尚未渲染</span>
+            </div>
+            <div class="canvas-stage" data-role="canvas-stage">
+              <div class="canvas-layer" data-role="canvas-layer">
+                <canvas data-role="page-canvas" aria-label="PDF 页面画布"></canvas>
+                <div class="source-overlay" data-role="source-overlay"></div>
+              </div>
+            </div>
+          </section>
+          <section class="page-pane translated-pane" data-role="translated-pane" aria-label="页面译文">
+            <div class="pane-heading">
+              <strong>译文</strong>
+              <span data-role="translation-status">等待翻译</span>
+            </div>
+            <div class="translation-blocks" data-role="translation-blocks"></div>
+          </section>
+        </div>
+      </article>
+    </template>
+
+    <script src="../vendor/pdfjs/pdf.js"></script>
+    <script type="module" src="reader.js"></script>
+  </body>
+</html>

@@ -2,6 +2,7 @@ const DEFAULT_SILICONFLOW_MODEL = "Qwen/Qwen3.5-4B";
 const SILICONFLOW_MODELS = [
   DEFAULT_SILICONFLOW_MODEL,
   "Qwen/Qwen3.5-35B-A3B",
+  "Qwen/Qwen3.5-397B-A17B",
 ];
 const TEXT_PROVIDER_DEEPSEEK_FIRST = "deepseek_first";
 

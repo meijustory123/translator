@@ -20,9 +20,11 @@ import {
   SENDER_KIND,
 } from "../shared/message-sender.js";
 import { chooseTextProvider } from "../shared/routing.js";
+import { createPdfJobManager } from "./pdf-job-manager.js";
 
 const IMAGE_MENU_ID = "translate-image-with-siliconflow";
 const TRANSLATION_PORT_NAME = "multi-provider-translation";
+const PDF_TRANSLATION_PORT_NAME = "pdf-translation-job";
 const MAX_TEXT_LENGTH = 20_000;
 const IMAGE_PROCESSING_TIMEOUT_MS = 20_000;
 const STREAM_IDLE_TIMEOUT_MS = 45_000;
@@ -31,8 +33,15 @@ const FIRST_CONTENT_TIMEOUT_MS = 120_000;
 const REQUEST_TOTAL_TIMEOUT_MS = 180_000;
 const ERROR_BODY_TIMEOUT_MS = 10_000;
 const MAX_ERROR_BODY_BYTES = 64 * 1_024;
+const MAX_STREAM_RESPONSE_BYTES = 8 * 1_024 * 1_024;
+const MAX_SSE_REMAINDER_CHARACTERS = 256 * 1_024;
+const MAX_STREAM_OUTPUT_CHARACTERS = 1_000_000;
 const TEXT_PROVIDER_DEEPSEEK_FIRST = "deepseek_first";
 const TEXT_PROVIDER_SILICONFLOW = "siliconflow";
+const pdfJobManager = createPdfJobManager({
+  resolveTextRoute,
+  streamChatCompletion,
+});
 
 void initializeStorage();
 
@@ -61,6 +70,15 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 chrome.runtime.onConnect.addListener((port) => {
+  if (port.name === PDF_TRANSLATION_PORT_NAME) {
+    if (!isNamedExtensionPage(port.sender, chrome.runtime.id, "pdf/reader.html")) {
+      port.disconnect();
+      return;
+    }
+    pdfJobManager.connect(port);
+    return;
+  }
+
   if (
     port.name !== TRANSLATION_PORT_NAME ||
     classifyMessageSender(port.sender, chrome.runtime.id) !== SENDER_KIND.CONTENT_SCRIPT
@@ -90,6 +108,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     "options/options.html",
   );
   const isPopupPage = isNamedExtensionPage(sender, chrome.runtime.id, "popup/popup.html");
+  const isPdfReaderPage = isNamedExtensionPage(
+    sender,
+    chrome.runtime.id,
+    "pdf/reader.html",
+  );
   if (senderKind === SENDER_KIND.UNTRUSTED || !message || typeof message !== "object") {
     sendResponse({ ok: false, error: "无效请求。" });
     return false;
@@ -109,6 +132,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse(settings);
       })
       .catch(() => sendResponse({ ok: false, error: "读取设置失败。" }));
+    return true;
+  }
+
+  if (message.type === "GET_PDF_SETTINGS" && isPdfReaderPage) {
+    void getPublicSettings()
+      .then((settings) => {
+        sendResponse({
+          ok: settings.ok,
+          hasTextProvider: settings.hasApiKey,
+          activeTextProvider: settings.activeTextProvider,
+          providerLabel:
+            settings.activeTextProvider === "deepseek" ? "DeepSeek" : "硅基流动",
+          textModel: settings.textModel,
+          hasSiliconFlowKey: settings.hasSiliconFlowKey,
+          imageModel: settings.imageModel,
+        });
+      })
+      .catch(() => sendResponse({ ok: false, error: "读取 PDF 翻译设置失败。" }));
     return true;
   }
 
@@ -817,6 +858,8 @@ async function streamChatCompletion({
     let buffer = "";
     let receivedDone = false;
     let receivedContent = false;
+    let receivedResponseBytes = 0;
+    let receivedOutputCharacters = 0;
 
     const resetIdleTimer = () => {
       clearTimeout(idleTimer);
@@ -826,13 +869,27 @@ async function streamChatCompletion({
       }, STREAM_IDLE_TIMEOUT_MS);
     };
     const emitDelta = (delta) => {
+      if (receivedOutputCharacters + delta.length > MAX_STREAM_OUTPUT_CHARACTERS) {
+        const error = createAppError(
+          "翻译服务返回的有效内容超过安全上限，已停止读取。",
+          "STREAM_OUTPUT_TOO_LARGE",
+        );
+        requestController.abort("stream-output-too-large");
+        throw error;
+      }
+      receivedOutputCharacters += delta.length;
       if (!receivedContent) {
         receivedContent = true;
         clearTimeout(firstContentTimer);
         firstContentTimer = null;
         onProgress("STREAMING");
       }
-      onDelta(delta);
+      try {
+        onDelta(delta);
+      } catch (error) {
+        requestController.abort("stream-consumer-error");
+        throw error;
+      }
       resetIdleTimer();
     };
 
@@ -845,12 +902,37 @@ async function streamChatCompletion({
       const { done, value } = await reader.read();
       if (done) {
         buffer += decoder.decode();
+        if (buffer.length > MAX_SSE_REMAINDER_CHARACTERS) {
+          const error = createAppError(
+            "翻译服务返回了异常过长的不完整流事件。",
+            "SSE_REMAINDER_TOO_LARGE",
+          );
+          requestController.abort("sse-remainder-too-large");
+          throw error;
+        }
         break;
       }
 
+      receivedResponseBytes += value.byteLength;
+      if (receivedResponseBytes > MAX_STREAM_RESPONSE_BYTES) {
+        const error = createAppError(
+          "翻译服务返回的数据量超过安全上限，已停止读取。",
+          "STREAM_RESPONSE_TOO_LARGE",
+        );
+        requestController.abort("stream-response-too-large");
+        throw error;
+      }
       buffer += decoder.decode(value, { stream: true });
       const parsed = consumeSseEvents(buffer, emitDelta);
       buffer = parsed.remainder;
+      if (buffer.length > MAX_SSE_REMAINDER_CHARACTERS) {
+        const error = createAppError(
+          "翻译服务返回了异常过长的不完整流事件。",
+          "SSE_REMAINDER_TOO_LARGE",
+        );
+        requestController.abort("sse-remainder-too-large");
+        throw error;
+      }
       receivedDone = parsed.done;
     }
 

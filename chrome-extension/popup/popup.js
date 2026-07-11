@@ -6,6 +6,7 @@ const imageKeyStatus = document.querySelector("#imageKeyStatus");
 const imageModelStatus = document.querySelector("#imageModelStatus");
 const autoTranslate = document.querySelector("#autoTranslate");
 const imageTranslate = document.querySelector("#imageTranslate");
+const pdfTranslate = document.querySelector("#pdfTranslate");
 const settingsShortcut = document.querySelector("#settingsShortcut");
 const feedback = document.querySelector("#feedback");
 const pageStatus = document.querySelector("#pageStatus");
@@ -110,6 +111,18 @@ imageTranslate.addEventListener("click", async () => {
     window.close();
   } catch {
     feedback.textContent = "此页面不允许扩展运行，请在普通网页中使用。";
+  }
+});
+
+pdfTranslate.addEventListener("click", async () => {
+  feedback.textContent = "";
+  try {
+    await chrome.tabs.create({
+      url: chrome.runtime.getURL("pdf/reader.html"),
+    });
+    window.close();
+  } catch {
+    feedback.textContent = "无法打开 PDF 工作台，请重新加载扩展后再试。";
   }
 });
 

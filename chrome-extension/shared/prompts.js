@@ -5,6 +5,7 @@ export const DEFAULT_SILICONFLOW_MODEL = "Qwen/Qwen3.5-4B";
 export const SILICONFLOW_MODELS = Object.freeze([
   "Qwen/Qwen3.5-4B",
   "Qwen/Qwen3.5-35B-A3B",
+  "Qwen/Qwen3.5-397B-A17B",
 ]);
 
 export const TEXT_SYSTEM_PROMPT = `你是一个专业、严谨的翻译器。你的唯一任务是把用户提供的英语、日语或俄语翻译为简体中文。
