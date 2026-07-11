@@ -417,11 +417,11 @@ function updateAnalysisSummary() {
 
   if (!state.settings?.hasTextProvider) {
     providerSummary.textContent =
-      `检测到 ${blockCount} 个文字块；${state.settings?.configurationHint || "尚未配置可用的文本供应商，请先打开翻译设置。"}扫描页不会发送。`;
+      `识别到 ${blockCount} 个段落；${state.settings?.configurationHint || "尚未配置可用的文本供应商，请先打开翻译设置。"}扫描页不会发送。`;
     return;
   }
   providerSummary.textContent =
-    `原生文字将分 ${state.batches.length} 批发送；每个批次开始时使用当时的当前文本供应商和模型。` +
+    `原生文字将按页发送，共 ${state.batches.length} 页；段落仅用于确定页内文字顺序。每页开始时使用当时的当前文本供应商和模型。` +
     `当前配置为 ${state.settings.providerLabel} / ${state.settings.textModel}；` +
     `${scannedPages} 个扫描页不会发送。原始 PDF、文件名和页面图像都不会上传。`;
 }
@@ -496,6 +496,10 @@ function createPageTypeLabel(page) {
   return details.length ? `文本页 · ${details.join(" · ")}` : "文本页";
 }
 
+function pageTranslationId(pageNumber) {
+  return `p${pageNumber}-page`;
+}
+
 function renderPageTextBlocks(page) {
   const card = state.pageCards.get(page.pageNumber);
   if (!card) return;
@@ -512,16 +516,20 @@ function renderPageTextBlocks(page) {
     return;
   }
 
-  const displayBlocks = page.blocks.map((block) => ({
+  const pageTarget = state.translations.get(pageTranslationId(page.pageNumber))
+    || state.partialTranslations.get(pageTranslationId(page.pageNumber))
+    || "";
+  const displayBlocks = page.blocks.map((block, index) => ({
     ...block,
     source: block.text,
-    target: state.translations.get(block.id) || state.partialTranslations.get(block.id) || "",
+    target: index === 0 ? pageTarget : "",
   }));
   const rendered = renderPageBlocks({
     sourceContainer,
     translationContainer,
     blocks: displayBlocks,
     pendingText: "等待译文…",
+    continuousTranslation: true,
   });
   state.blockRenderCleanup.set(page.pageNumber, rendered.destroy);
   const canvas = card.querySelector('[data-role="page-canvas"]');
@@ -550,7 +558,7 @@ async function startTranslation() {
     setJobControls(true);
     startKeepAlive();
     setDocumentStatus("正在翻译 PDF", "working");
-    overallProgressText.textContent = "正在分批翻译原生文字…";
+    overallProgressText.textContent = "正在按页翻译原生文字…";
     scheduleBatches();
   } catch (error) {
     if (generation !== state.generation || state.disposed) return;
@@ -598,7 +606,7 @@ async function createBackgroundJob({ generation }) {
     throw new DOMException("Aborted", "AbortError");
   }
   providerSummary.textContent =
-    "每个文本批次都会在开始时读取当前供应商与模型；仅发送当前文字批次，扫描页和原始 PDF 不会上传。";
+    "每一页都会在开始时读取当前供应商与模型；仅发送该页按阅读顺序排列的文字，扫描页和原始 PDF 不会上传。";
 }
 
 function scheduleBatches() {
@@ -639,14 +647,14 @@ function handleJobEvent(message) {
     if (batch) {
       const card = state.pageCards.get(batch.pageNumber);
       card.querySelector('[data-role="translation-status"]').textContent =
-        message.type === "DELTA" ? "正在接收结构化译文…" : "已发送当前批次";
+        message.type === "DELTA" ? "正在接收整页译文…" : "已发送当前页";
       if (
         message.type === "BATCH_STARTED"
         && typeof message.providerLabel === "string"
         && typeof message.model === "string"
       ) {
         providerSummary.textContent =
-          `当前批次使用 ${message.providerLabel} / ${message.model}；后续批次仍会读取届时的当前配置。`;
+          `当前页使用 ${message.providerLabel} / ${message.model}；后续页面仍会读取届时的当前配置。`;
       }
     }
     return;
@@ -692,7 +700,7 @@ function handleJobEvent(message) {
     if (!batch) return;
     clearPartialTranslations(batch);
     batch.state = "failed";
-    batch.error = message.error || "当前批次翻译失败。";
+    batch.error = message.error || "当前页面翻译失败。";
     batch.errorCode = message.code || "BATCH_FAILED";
     batch.retryable = Boolean(message.retryable);
     queueStreamingPageRender(batch.pageNumber);
@@ -746,6 +754,15 @@ function refreshStreamingTranslationTargets(pageNumber) {
   const card = state.pageCards.get(pageNumber);
   const container = card?.querySelector('[data-role="translation-blocks"]');
   if (!page || !container) return;
+  const continuousTarget = container.querySelector(".translation-page-text");
+  if (continuousTarget) {
+    const pageTarget = state.translations.get(pageTranslationId(pageNumber))
+      || state.partialTranslations.get(pageTranslationId(pageNumber))
+      || "";
+    continuousTarget.textContent = pageTarget || "等待译文…";
+    continuousTarget.classList.toggle("is-pending", !pageTarget);
+    return;
+  }
   const textById = new Map(page.blocks.map((block) => [
     block.id,
     state.translations.get(block.id) || state.partialTranslations.get(block.id) || "",
@@ -779,7 +796,7 @@ function pauseTranslation() {
   pauseTranslationButton.hidden = true;
   resumeTranslationButton.hidden = false;
   cancelTranslationButton.disabled = false;
-  overallProgressText.textContent = "已暂停；在途批次已取消，继续时只重跑未完成批次。";
+  overallProgressText.textContent = "已暂停；正在翻译的页面已取消，继续时只重跑未完成页面。";
   setDocumentStatus("PDF 翻译已暂停", "ready");
   stopKeepAlive();
   updateProgress();
@@ -790,7 +807,7 @@ function resumeTranslation() {
   state.phase = "translating";
   pauseTranslationButton.hidden = false;
   resumeTranslationButton.hidden = true;
-  overallProgressText.textContent = "正在继续翻译未完成批次…";
+  overallProgressText.textContent = "正在继续翻译未完成页面…";
   setDocumentStatus("正在继续翻译 PDF", "working");
   startKeepAlive();
   if (!state.jobClient?.port) {
@@ -879,7 +896,7 @@ async function rebuildJobForPageRetry(pageNumber, retryPlan) {
     setJobControls(true);
     startKeepAlive();
     setDocumentStatus("正在重试失败页面", "working");
-    overallProgressText.textContent = "后台任务已刷新，正在重试本页未完成批次…";
+    overallProgressText.textContent = "后台任务已刷新，正在重新翻译本页…";
     scheduleBatches();
   } catch (error) {
     if (generation !== state.generation || state.disposed) return;
@@ -904,10 +921,6 @@ function createPageRetryPlan(pageNumber) {
     }
 
     changed = true;
-    if (batch.errorCode === "INVALID_BATCH_RESPONSE" && batch.blocks.length > 1) {
-      nextBatches.push(...splitBatchForManualRetry(batch));
-      continue;
-    }
     nextBatches.push({
       ...batch,
       state: "pending",
@@ -922,28 +935,6 @@ function createPageRetryPlan(pageNumber) {
     previousBatches: state.batches,
     nextBatches,
   };
-}
-
-function splitBatchForManualRetry(batch) {
-  const middle = Math.ceil(batch.blocks.length / 2);
-  return [batch.blocks.slice(0, middle), batch.blocks.slice(middle)]
-    .filter((blocks) => blocks.length > 0)
-    .map((blocks, index) => ({
-      ...batch,
-      id: `${batch.id}.r${batch.attempt + 1}.${index + 1}`,
-      batchId: `${batch.id}.r${batch.attempt + 1}.${index + 1}`,
-      blocks,
-      characterCount: blocks.reduce(
-        (total, block) => total + Array.from(block.text).length,
-        0,
-      ),
-      state: "pending",
-      attempt: 0,
-      attemptId: "",
-      error: "",
-      errorCode: "",
-      retryable: false,
-    }));
 }
 
 function handleJobDisconnect({ activeBatchIds }) {
@@ -977,7 +968,7 @@ async function reconnectBackgroundJob() {
   const reconnectToken = {};
   state.reconnecting = true;
   state.reconnectToken = reconnectToken;
-  overallProgressText.textContent = "后台连接中断，正在恢复未完成批次…";
+  overallProgressText.textContent = "后台连接中断，正在恢复未完成页面…";
   stopKeepAlive();
   let lastError = null;
   for (const delay of RECONNECT_DELAYS_MS) {
@@ -1005,7 +996,7 @@ async function reconnectBackgroundJob() {
       state.reconnecting = false;
       state.reconnectToken = null;
       startKeepAlive();
-      overallProgressText.textContent = "连接已恢复，正在重排未完成批次…";
+      overallProgressText.textContent = "连接已恢复，正在重新安排未完成页面…";
       scheduleBatches();
       return;
     } catch (error) {
@@ -1055,11 +1046,9 @@ function updatePageState(pageNumber) {
   if (failed) {
     setStatus(status, "failed", "翻译失败");
     retry.hidden = false;
-    const retryHint = failed.errorCode === "INVALID_BATCH_RESPONSE"
-      ? " 重试时会自动拆小这个批次。"
-      : failed.retryable
-        ? " 可手动重试。"
-        : "";
+    const retryHint = failed.errorCode === "INVALID_BATCH_RESPONSE" || failed.retryable
+      ? " 可重新翻译本页。"
+      : "";
     translationStatus.textContent = `${failed.error}${retryHint}`;
   } else if (batches.some((batch) => batch.state === "translating")) {
     setStatus(status, "translating", "翻译中");
@@ -1075,7 +1064,7 @@ function updatePageState(pageNumber) {
   ) {
     setStatus(status, "cancelled", "已取消");
     retry.hidden = true;
-    translationStatus.textContent = "本页未完成批次已取消";
+    translationStatus.textContent = "本页翻译已取消";
   } else {
     setStatus(status, "pending", state.phase === "paused" ? "已暂停" : "等待翻译");
     retry.hidden = true;
@@ -1124,7 +1113,7 @@ function finishIfSettled() {
   settledClient?.disconnect();
   setJobControls(false);
   if (failures) {
-    overallProgressText.textContent = `${failures} 个批次失败，可在对应页面单独重试。`;
+    overallProgressText.textContent = `${failures} 页翻译失败，可在对应页面单独重试。`;
     setDocumentStatus("PDF 翻译部分完成", "error");
   } else {
     overallProgressText.textContent = "全部可提取文字已翻译完成。";
@@ -1158,11 +1147,11 @@ function buildExportData() {
     pages: state.pages.map((page) => ({
       pageNumber: page.pageNumber,
       pageType: page.type === "scanned" ? "扫描页（未翻译）" : "文本页",
-      blocks: page.blocks.map((block) => ({
-        id: block.id,
-        source: block.text,
-        target: state.translations.get(block.id) || "",
-      })),
+      blocks: page.type === "scanned" ? [] : [{
+        id: pageTranslationId(page.pageNumber),
+        source: page.blocks.map((block) => block.text).join("\n\n"),
+        target: state.translations.get(pageTranslationId(page.pageNumber)) || "",
+      }],
     })),
   };
 }

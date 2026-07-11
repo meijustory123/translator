@@ -439,7 +439,7 @@ export function createTextBlock(block = {}, options = {}) {
   element.className = options.className || "source-block";
   element.dataset.blockId = blockId;
   element.textContent = sourceText;
-  element.setAttribute("aria-label", sourceText || `原文块 ${blockId}`);
+  element.setAttribute("aria-label", sourceText || `原文区域 ${blockId}`);
   applyNormalizedBbox(element, block.bbox);
   return element;
 }
@@ -478,6 +478,7 @@ export function renderPageBlocks({
   blocks = [],
   document: documentOption,
   pendingText = "等待译文…",
+  continuousTranslation = false,
 } = {}) {
   if (!sourceContainer || !translationContainer) {
     throw new TypeError("需要 sourceContainer 和 translationContainer");
@@ -488,15 +489,33 @@ export function renderPageBlocks({
   const sourceBlocks = [];
   const translationBlocks = [];
 
-  for (const block of Array.isArray(blocks) ? blocks : []) {
+  const normalizedBlocks = Array.isArray(blocks) ? blocks : [];
+  for (const block of normalizedBlocks) {
     if (normalizeBbox(block?.bbox)) {
       const sourceElement = createTextBlock(block, { document: documentObject });
       sourceBlocks.push(sourceElement);
       sourceFragment.append(sourceElement);
     }
-    const translationElement = createTranslationBlock(block, { document: documentObject, pendingText });
-    translationBlocks.push(translationElement);
-    translationFragment.append(translationElement);
+    if (!continuousTranslation) {
+      const translationElement = createTranslationBlock(block, { document: documentObject, pendingText });
+      translationBlocks.push(translationElement);
+      translationFragment.append(translationElement);
+    }
+  }
+
+  if (continuousTranslation) {
+    const article = documentObject.createElement("article");
+    const target = documentObject.createElement("p");
+    const translatedParts = normalizedBlocks
+      .map((block) => stringValue(block.target ?? block.translation ?? block.translatedText).trim())
+      .filter(Boolean);
+    article.className = "translation-page";
+    target.className = "translation-page-text";
+    target.textContent = translatedParts.join("\n\n") || pendingText;
+    target.classList.toggle("is-pending", translatedParts.length === 0);
+    article.append(target);
+    translationBlocks.push(article);
+    translationFragment.append(article);
   }
 
   sourceContainer.replaceChildren(sourceFragment);

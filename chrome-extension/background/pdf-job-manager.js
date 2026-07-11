@@ -9,7 +9,7 @@ export const PDF_JOB_LIMITS = Object.freeze({
   maxJobUtf8Bytes: 32 * 1_024 * 1_024,
   maxBatchCharacters: 20_000,
   maxBatchUtf8Bytes: 80 * 1_024,
-  maxBlocksPerBatch: 128,
+  maxBlocksPerBatch: 1,
   maxResponseCharacters: 1_000_000,
   maxIdentifierLength: 100,
 });
@@ -158,7 +158,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
       batchId = validateIdentifier(message.batchId, "BATCH_ID_INVALID");
       job = requireOwnedJob(connection, jobId);
       if (job.seenBatchIds.has(batchId)) {
-        throw createManagerError("批次标识已存在。", "BATCH_ALREADY_EXISTS");
+        throw createManagerError("页面任务标识已存在。", "BATCH_ALREADY_EXISTS");
       }
 
       const validated = validateBlocks(message.blocks);
@@ -220,26 +220,20 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
     let route = null;
     const inputIds = batch.blocks.map(({ id }) => id);
     const messages = createPdfTextBatchMessages(batch.blocks);
-    const lastProgressTargets = new Map();
+    const pageId = inputIds[0];
+    let lastProgressLength = 0;
     const flushProgress = () => {
       progressTimer = null;
       if (!isCurrentActiveBatch(job, batch, controller)) {
         return;
       }
-      const translations = parsePdfTextBatchProgress(output, inputIds).filter(({ id, target }) => {
-        const previous = lastProgressTargets.get(id) || "";
-        if (target.length <= previous.length || !target.startsWith(previous)) {
-          return false;
-        }
-        lastProgressTargets.set(id, target);
-        return true;
-      });
-      if (translations.length > 0) {
+      if (output.length > lastProgressLength) {
+        lastProgressLength = output.length;
         safePost(job.connection, {
           type: "BATCH_PROGRESS",
           jobId: job.jobId,
           batchId: batch.batchId,
-          translations,
+          translations: [{ id: pageId, target: output }],
         });
       }
     };
@@ -271,7 +265,7 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
           }
           if (output.length + delta.length > PDF_JOB_LIMITS.maxResponseCharacters) {
             throw createManagerError(
-              "翻译服务返回内容异常过长，已停止当前批次。",
+              "翻译服务返回内容异常过长，已停止当前页面翻译。",
               "BATCH_OUTPUT_TOO_LARGE",
             );
           }
@@ -284,13 +278,16 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
         return;
       }
 
-      const translations = parsePdfTextBatchResult(output, inputIds);
+      const target = output.trim();
+      if (!target) {
+        throw createManagerError("翻译服务未返回整页译文。", "EMPTY_PAGE_RESPONSE");
+      }
       finishBatch(job, batch, "completed");
       safePost(job.connection, {
         type: "BATCH_DONE",
         jobId: job.jobId,
         batchId: batch.batchId,
-        translations,
+        translations: [{ id: pageId, target }],
       });
     } catch (error) {
       if (!isCurrentActiveBatch(job, batch, controller)) {
@@ -449,10 +446,10 @@ export function createPdfJobManager({ resolveTextRoute, streamChatCompletion }) 
 
   function assertJobCanAcceptBatch(job, validated) {
     if (job.acceptedBatchCount >= PDF_JOB_LIMITS.maxBatchesPerJob) {
-      throw createManagerError("PDF 任务批次数超过限制。", "JOB_BATCH_LIMIT");
+      throw createManagerError("PDF 页面任务数超过限制。", "JOB_BATCH_LIMIT");
     }
     if (job.queuedTextCount >= PDF_JOB_LIMITS.maxQueuedBatchesPerJob) {
-      throw createManagerError("PDF 待翻译队列已满，请等待当前批次完成。", "JOB_QUEUE_FULL");
+      throw createManagerError("PDF 待翻译队列已满，请等待当前页面完成。", "JOB_QUEUE_FULL");
     }
     if (job.acceptedCharacters + validated.characterCount > PDF_JOB_LIMITS.maxJobCharacters) {
       throw createManagerError("PDF 任务累计文本字符数超过限制。", "JOB_TEXT_TOO_LONG");
@@ -498,12 +495,12 @@ export function parsePdfTextBatchResult(value, inputIds) {
   }
 
   if (!Array.isArray(parsed) || !Array.isArray(inputIds) || parsed.length !== inputIds.length) {
-    throw createManagerError("翻译结果与原文块数量不一致。", "INVALID_BATCH_RESPONSE");
+    throw createManagerError("整页翻译结果结构不完整。", "INVALID_BATCH_RESPONSE");
   }
 
   const expectedIds = new Set(inputIds);
   if (expectedIds.size !== inputIds.length) {
-    throw createManagerError("原文块标识重复。", "INVALID_BATCH_RESPONSE");
+    throw createManagerError("页面翻译标识重复。", "INVALID_BATCH_RESPONSE");
   }
 
   const returnedIds = new Set();
@@ -518,14 +515,14 @@ export function parsePdfTextBatchResult(value, inputIds) {
       !expectedIds.has(entry.id) ||
       returnedIds.has(entry.id)
     ) {
-      throw createManagerError("翻译结果包含缺失、重复或额外的块标识。", "INVALID_BATCH_RESPONSE");
+      throw createManagerError("整页翻译结果包含无效的页面标识。", "INVALID_BATCH_RESPONSE");
     }
     returnedIds.add(entry.id);
     return { id: entry.id, target: entry.target };
   });
 
   if (returnedIds.size !== expectedIds.size) {
-    throw createManagerError("翻译结果缺少原文块标识。", "INVALID_BATCH_RESPONSE");
+    throw createManagerError("整页翻译结果缺少页面标识。", "INVALID_BATCH_RESPONSE");
   }
   return translations;
 }
@@ -788,7 +785,7 @@ function validateBlocks(blocks) {
     || blocks.length > PDF_JOB_LIMITS.maxBlocksPerBatch
   ) {
     throw createManagerError(
-      `翻译批次必须包含 1–${PDF_JOB_LIMITS.maxBlocksPerBatch} 个文本块。`,
+      "每次页面翻译必须包含一份整页文字。",
       "BLOCKS_INVALID",
     );
   }
@@ -800,14 +797,14 @@ function validateBlocks(blocks) {
 
   for (const block of blocks) {
     if (!isRecord(block)) {
-      throw createManagerError("文本块格式无效。", "BLOCKS_INVALID");
+      throw createManagerError("整页文字格式无效。", "BLOCKS_INVALID");
     }
     const id = validateIdentifier(block.id, "BLOCK_ID_INVALID");
     if (ids.has(id)) {
-      throw createManagerError("文本块标识不能重复。", "DUPLICATE_BLOCK_ID");
+      throw createManagerError("页面标识不能重复。", "DUPLICATE_BLOCK_ID");
     }
     if (typeof block.text !== "string" || !block.text.trim()) {
-      throw createManagerError("文本块不能为空。", "BLOCK_TEXT_INVALID");
+      throw createManagerError("整页文字不能为空。", "BLOCK_TEXT_INVALID");
     }
 
     ids.add(id);
@@ -815,12 +812,12 @@ function validateBlocks(blocks) {
     utf8Bytes += encoder.encode(block.text).byteLength;
     if (characterCount > PDF_JOB_LIMITS.maxBatchCharacters) {
       throw createManagerError(
-        `翻译批次超过 ${PDF_JOB_LIMITS.maxBatchCharacters.toLocaleString("en-US")} 个字符。`,
+        `整页文字超过 ${PDF_JOB_LIMITS.maxBatchCharacters.toLocaleString("en-US")} 个字符。`,
         "BATCH_TEXT_TOO_LONG",
       );
     }
     if (utf8Bytes > PDF_JOB_LIMITS.maxBatchUtf8Bytes) {
-      throw createManagerError("翻译批次超过 UTF-8 字节限制。", "BATCH_UTF8_TOO_LARGE");
+      throw createManagerError("整页文字超过 UTF-8 字节限制。", "BATCH_UTF8_TOO_LARGE");
     }
 
     normalized.push(Object.freeze({ id, text: block.text }));
@@ -848,7 +845,7 @@ function validateIdentifier(value, code) {
     value.length > PDF_JOB_LIMITS.maxIdentifierLength ||
     !IDENTIFIER_PATTERN.test(value)
   ) {
-    throw createManagerError("任务或文本块标识无效。", code);
+    throw createManagerError("任务或页面标识无效。", code);
   }
   return value;
 }

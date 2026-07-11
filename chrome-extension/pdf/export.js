@@ -188,9 +188,9 @@ function renderPage(pageValue, index) {
   return `<section class="page" data-page-number="${pageNumber}">
       <header class="page-header">
         <h2>第 ${pageNumber} 页</h2>
-        <span>${escapeHtml(typeLabel)} · ${blocks.length} 个文本块</span>
+        <span>${escapeHtml(typeLabel)}</span>
       </header>
-      <div class="blocks">${blockMarkup || '<p class="empty-page">本页没有可导出的文本块。</p>'}</div>
+      <div class="blocks">${blockMarkup || '<p class="empty-page">本页没有可导出的文字。</p>'}</div>
     </section>`;
 }
 

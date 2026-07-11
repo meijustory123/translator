@@ -17,7 +17,7 @@
           <span class="brand-mark" aria-hidden="true">译</span>
           <span>
             <strong>PDF 翻译工作台</strong>
-            <small>本地解析，分批翻译</small>
+            <small>本地解析，按页翻译</small>
           </span>
         </a>
         <div class="header-actions">
@@ -111,7 +111,7 @@
               <strong id="mixedPageCount">—</strong>
             </div>
             <div class="summary-item">
-              <span>文本块</span>
+              <span>识别段落</span>
               <strong id="textBlockCount">—</strong>
             </div>
           </div>
@@ -120,7 +120,7 @@
             <span class="provider-icon" aria-hidden="true">⇄</span>
             <div>
               <strong>预计发送方式</strong>
-              <p id="providerSummary">完成分析后显示将发送的文本块及供应商；扫描页会跳过。</p>
+              <p id="providerSummary">完成分析后显示将发送的整页文字及供应商；扫描页会跳过。</p>
             </div>
           </div>
 
@@ -130,7 +130,7 @@
               <strong>我已了解会发送哪些内容</strong>
               <small>
                 扩展不会上传原始 PDF 文件；翻译全部页面时，供应商仍会分批收到足以覆盖全文的文本。
-                当前版本仅发送提取出的文本块；扫描页会被标记并跳过，不会发送页面像素。请勿处理不应发送给第三方的敏感文档。
+                当前版本按页发送提取并排序后的整页文字；扫描页会被标记并跳过，不会发送页面像素。请勿处理不应发送给第三方的敏感文档。
               </small>
             </span>
           </label>

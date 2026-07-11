@@ -956,6 +956,28 @@ progress::-moz-progress-bar {
   gap: 10px;
 }
 
+.translation-page {
+  padding: 18px 20px;
+  border: 1px solid #e3e6ef;
+  background: #fff;
+  border-radius: 10px;
+  box-shadow: 0 2px 8px rgba(41, 52, 82, 0.035);
+}
+
+.translation-page-text {
+  margin: 0;
+  color: #222c40;
+  font-size: 14px;
+  line-height: 1.9;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.translation-page-text.is-pending {
+  color: #929aaa;
+  font-style: italic;
+}
+
 .translation-block {
   padding: 13px 14px;
   border: 1px solid #e3e6ef;

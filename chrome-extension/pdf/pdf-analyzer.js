@@ -1,11 +1,10 @@
-const DEFAULT_TARGET_CHARS = 20_000;
 const DEFAULT_MAX_CHARS = 20_000;
-const MAX_BATCH_BLOCKS = 128;
+const MAX_BATCH_BLOCKS = 1;
 const MIN_VALID_TEXT_CHARS = 12;
 const MIN_SPARSE_TEXT_COVERAGE = 0.00025;
 
 export const PDF_TEXT_LIMITS = Object.freeze({
-  targetChars: DEFAULT_TARGET_CHARS,
+  targetChars: DEFAULT_MAX_CHARS,
   maxChars: DEFAULT_MAX_CHARS,
   maxBlocksPerBatch: MAX_BATCH_BLOCKS,
   minValidTextChars: MIN_VALID_TEXT_CHARS,
@@ -705,7 +704,6 @@ function classifyLines(lines, logicalHeight) {
       && (
         HEADING_TEXT_RE.test(line.text)
         || line.fontSize >= bodyFontSize * 1.22
-        || (line.isBold && characterCount <= 160)
       );
     if (line.typeHint === "table") {
       type = "table";
@@ -1068,7 +1066,12 @@ function canMergeLines(previous, next) {
   if (!previous || previous.column !== next.column || previous.type !== next.type) return false;
   const gap = next.layoutBBox.y - bboxBottom(previous.layoutBBox);
   const fontSize = median([previous.fontSize, next.fontSize], next.fontSize);
-  if (gap < -fontSize * 0.35 || gap > fontSize * 0.85) return false;
+  const maximumGap = next.type === "paragraph"
+    ? fontSize * 1.3
+    : next.type === "quote"
+      ? fontSize * 1.1
+      : fontSize * 0.85;
+  if (gap < -fontSize * 0.35 || gap > maximumGap) return false;
   if (Math.max(previous.fontSize, next.fontSize) / Math.max(1, Math.min(previous.fontSize, next.fontSize)) > 1.35) {
     return false;
   }
@@ -1089,9 +1092,36 @@ function canMergeLines(previous, next) {
   const previousCenter = previous.layoutBBox.x + previous.layoutBBox.width / 2;
   const nextCenter = next.layoutBBox.x + next.layoutBBox.width / 2;
   const centerAligned = Math.abs(previousCenter - nextCenter) <= Math.max(18, fontSize * 1.8);
-  if (indentDifference > Math.max(18, fontSize * 1.5) && !centerAligned) return false;
-  if (gap > fontSize * 0.6 && TERMINAL_PUNCTUATION_RE.test(previous.text)) return false;
+  const expectedIndentTransition = next.type === "paragraph"
+    && (previous.paragraphStart || REFERENCE_ENTRY_RE.test(previous.text))
+    && indentDifference <= fontSize * 4;
+  if (
+    indentDifference > Math.max(18, fontSize * 1.5)
+    && !centerAligned
+    && !expectedIndentTransition
+  ) return false;
   return true;
+}
+
+function canLooselyMergeBodyLines(previous, next) {
+  if (!previous || previous.column !== next.column) return false;
+  const types = new Set([previous.type, next.type]);
+  const paragraphPair = types.size === 1 && types.has("paragraph");
+  const softHeadingPair = types.size === 2
+    && types.has("paragraph")
+    && types.has("heading")
+    && !HEADING_TEXT_RE.test(previous.type === "heading" ? previous.text : next.text);
+  if (!paragraphPair && !softHeadingPair) return false;
+
+  const fontSize = median([previous.fontSize, next.fontSize], next.fontSize);
+  const fontRatio = Math.max(previous.fontSize, next.fontSize)
+    / Math.max(1, Math.min(previous.fontSize, next.fontSize));
+  const gap = next.layoutBBox.y - bboxBottom(previous.layoutBBox);
+  const indentDifference = Math.abs(next.layoutBBox.x - previous.layoutBBox.x);
+  return gap >= -fontSize * 0.4
+    && gap <= fontSize * 1.8
+    && indentDifference <= fontSize * 5
+    && fontRatio <= 1.45;
 }
 
 function createBlocks(orderedLines, pageNumber) {
@@ -1099,7 +1129,10 @@ function createBlocks(orderedLines, pageNumber) {
   for (const line of orderedLines) {
     const group = groups[groups.length - 1];
     const previous = group?.lines[group.lines.length - 1];
-    if (!group || !canMergeLines(previous, line)) {
+    if (
+      !group
+      || (!canMergeLines(previous, line) && !canLooselyMergeBodyLines(previous, line))
+    ) {
       groups.push({ lines: [line] });
     } else {
       group.lines.push(line);
@@ -1466,10 +1499,7 @@ function normalizeBatchLimit(value, fallback, name) {
 export function buildTextBatches(pages, options = {}) {
   const pageList = Array.isArray(pages) ? pages : pages?.pages;
   if (!Array.isArray(pageList)) throw new TypeError("PDF 页面分析结果必须为数组");
-  const maxChars = normalizeBatchLimit(options.maxChars, DEFAULT_MAX_CHARS, "单批字符上限");
-  const defaultTarget = Math.min(DEFAULT_TARGET_CHARS, maxChars);
-  const targetChars = normalizeBatchLimit(options.targetChars, defaultTarget, "目标批次字符数");
-  if (targetChars > maxChars) throw new RangeError("目标批次字符数不能超过单批字符上限");
+  const maxChars = normalizeBatchLimit(options.maxChars, DEFAULT_MAX_CHARS, "单页字符上限");
 
   const batches = [];
   for (const page of pageList) {
@@ -1479,44 +1509,26 @@ export function buildTextBatches(pages, options = {}) {
     const blocks = Array.isArray(page?.blocks)
       ? page.blocks.filter((block) => String(block?.text ?? "").trim())
       : [];
-    let batchBlocks = [];
-    let characterCount = 0;
-    let pageBatchIndex = 0;
-
-    const flush = () => {
-      if (batchBlocks.length === 0) return;
-      pageBatchIndex += 1;
-      const batchId = `p${pageNumber}-t${String(pageBatchIndex).padStart(3, "0")}`;
-      batches.push({
-        id: batchId,
-        batchId,
-        pageNumber,
-        blocks: batchBlocks.map((block) => ({ id: block.id, text: block.text })),
-        characterCount,
-      });
-      batchBlocks = [];
-      characterCount = 0;
-    };
-
-    for (const block of blocks) {
-      const blockCharacters = countTextCharacters(block.text);
-      if (blockCharacters > maxChars) {
-        throw new RangeError(`文本块 ${block.id || "(无 ID)"} 超过单批字符上限；应在页面分析阶段拆分`);
-      }
-      if (
-        batchBlocks.length > 0
-        && (
-          characterCount + blockCharacters > maxChars
-          || batchBlocks.length >= MAX_BATCH_BLOCKS
-        )
-      ) {
-        flush();
-      }
-      batchBlocks.push(block);
-      characterCount += blockCharacters;
-      if (characterCount >= targetChars || batchBlocks.length >= MAX_BATCH_BLOCKS) flush();
+    if (blocks.length === 0) continue;
+    const pageText = blocks
+      .map((block) => String(block.text).trim())
+      .filter(Boolean)
+      .join("\n\n");
+    const characterCount = countTextCharacters(pageText);
+    if (characterCount > maxChars) {
+      throw new RangeError(
+        `第 ${pageNumber} 页文字超过单页翻译上限 ${maxChars.toLocaleString("en-US")} 个字符。`,
+      );
     }
-    flush();
+
+    const batchId = `p${pageNumber}-page`;
+    batches.push({
+      id: batchId,
+      batchId,
+      pageNumber,
+      blocks: [{ id: batchId, text: pageText }],
+      characterCount,
+    });
   }
   return batches;
 }
