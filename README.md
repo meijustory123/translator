@@ -3,3 +3,7 @@
 这是一个原生 Chrome Manifest V3 扩展，支持 DeepSeek 与硅基流动模型分流，以及英语、日语、俄语的划词翻译、划段落翻译和图片翻译。扩展代码位于 `chrome-extension/`，不需要安装依赖或执行构建命令。
 
 安装、配置、使用方法及隐私说明请阅读 [用户使用指南](./chrome-extension/用户使用指南.md)。
+
+
+<img width="2522" height="1042" alt="f0ed35f596f2b0fffcbe903c1798448b" src="https://github.com/user-attachments/assets/f782321d-f47a-470b-8a7a-39fae4ef22c6" />
+<img width="1078" height="574" alt="0d1a31a6d929778613e29d48ff30e1ba" src="https://github.com/user-attachments/assets/d4c794e7-a1b4-4448-8626-5f9800c6c776" />
