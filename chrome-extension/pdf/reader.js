@@ -149,7 +149,13 @@ function bindUiEvents() {
     button.addEventListener("click", () => setReadingView(button.dataset.view));
   }
   window.addEventListener("resize", syncAllOverlaySizes);
+  window.addEventListener("focus", () => void refreshPdfSettings());
   window.addEventListener("beforeunload", dispose);
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type === "PDF_PUBLIC_SETTINGS_CHANGED") {
+      void refreshPdfSettings();
+    }
+  });
 }
 
 async function refreshPdfSettings() {
@@ -411,7 +417,7 @@ function updateAnalysisSummary() {
 
   if (!state.settings?.hasTextProvider) {
     providerSummary.textContent =
-      `检测到 ${blockCount} 个文字块；尚未配置可用的文本供应商，请先打开翻译设置。扫描页不会发送。`;
+      `检测到 ${blockCount} 个文字块；${state.settings?.configurationHint || "尚未配置可用的文本供应商，请先打开翻译设置。"}扫描页不会发送。`;
     return;
   }
   providerSummary.textContent =

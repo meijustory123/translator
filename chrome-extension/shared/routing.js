@@ -1,5 +1,5 @@
-export function chooseTextProvider({ textProviderMode, deepSeekApiKey, siliconFlowApiKey }) {
-  if (textProviderMode !== "siliconflow" && deepSeekApiKey) {
+export function chooseTextProvider({ deepSeekApiKey, siliconFlowApiKey }) {
+  if (deepSeekApiKey) {
     return "deepseek";
   }
   if (siliconFlowApiKey) {

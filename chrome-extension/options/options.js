@@ -67,8 +67,10 @@ async function initialize() {
       await chrome.storage.local.remove("apiKey");
     }
 
-    textProviderMode.value =
-      settings.textProviderMode === "siliconflow" ? "siliconflow" : TEXT_PROVIDER_DEEPSEEK_FIRST;
+    textProviderMode.value = TEXT_PROVIDER_DEEPSEEK_FIRST;
+    if (settings.textProviderMode !== TEXT_PROVIDER_DEEPSEEK_FIRST) {
+      await chrome.storage.local.set({ textProviderMode: TEXT_PROVIDER_DEEPSEEK_FIRST });
+    }
     siliconFlowModel.value = SILICONFLOW_MODELS.includes(settings.siliconFlowModel)
       ? settings.siliconFlowModel
       : DEFAULT_SILICONFLOW_MODEL;
@@ -124,10 +126,8 @@ function bindProviderEvents(providerName) {
 }
 
 async function saveRoutingMode() {
-  const mode =
-    textProviderMode.value === "siliconflow" ? "siliconflow" : TEXT_PROVIDER_DEEPSEEK_FIRST;
   try {
-    await chrome.storage.local.set({ textProviderMode: mode });
+    await chrome.storage.local.set({ textProviderMode: TEXT_PROVIDER_DEEPSEEK_FIRST });
     updateRouteHint();
   } catch {
     routeHint.textContent = "供应商偏好保存失败，请重试。";
@@ -239,13 +239,6 @@ function updateProviderState(providerName, apiKey) {
 
 function updateRouteHint() {
   routeHint.classList.remove("error-text");
-  if (textProviderMode.value === "siliconflow") {
-    routeHint.textContent = providers.siliconflow.hasSavedKey
-      ? `当前划词与划段翻译使用硅基流动 ${siliconFlowModel.value}；图片使用同一模型。`
-      : "当前选择仅使用硅基流动，但尚未配置其 API Key。";
-    return;
-  }
-
   if (providers.deepseek.hasSavedKey) {
     routeHint.textContent =
       "当前划词与划段翻译优先使用 DeepSeek deepseek-v4-flash；图片仍使用硅基流动。";

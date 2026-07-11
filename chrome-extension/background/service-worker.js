@@ -39,7 +39,7 @@ const MAX_STREAM_OUTPUT_CHARACTERS = 1_000_000;
 const TEXT_PROVIDER_DEEPSEEK_FIRST = "deepseek_first";
 const TEXT_PROVIDER_SILICONFLOW = "siliconflow";
 const pdfJobManager = createPdfJobManager({
-  resolveTextRoute,
+  resolveTextRoute: resolvePdfTextRoute,
   streamChatCompletion,
 });
 
@@ -138,15 +138,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_PDF_SETTINGS" && isPdfReaderPage) {
     void getPublicSettings()
       .then((settings) => {
+        const activeTextProvider = settings.hasDeepSeekKey
+          ? "deepseek"
+          : settings.hasSiliconFlowKey
+            ? "siliconflow"
+            : "";
+        const hasTextProvider = Boolean(activeTextProvider);
+        const configurationHint = hasTextProvider
+          ? ""
+          : "尚未配置 DeepSeek 或硅基流动 API Key，请先打开翻译设置。";
         sendResponse({
           ok: settings.ok,
-          hasTextProvider: settings.hasApiKey,
-          activeTextProvider: settings.activeTextProvider,
+          hasTextProvider,
+          activeTextProvider,
           providerLabel:
-            settings.activeTextProvider === "deepseek" ? "DeepSeek" : "硅基流动",
-          textModel: settings.textModel,
+            activeTextProvider === "deepseek"
+              ? "DeepSeek"
+              : activeTextProvider === "siliconflow"
+                ? "硅基流动"
+                : "未配置",
+          textModel:
+            activeTextProvider === "deepseek"
+              ? DEEPSEEK_MODEL
+              : activeTextProvider === "siliconflow"
+                ? settings.siliconFlowModel
+                : "—",
           hasSiliconFlowKey: settings.hasSiliconFlowKey,
           imageModel: settings.imageModel,
+          configurationHint,
         });
       })
       .catch(() => sendResponse({ ok: false, error: "读取 PDF 翻译设置失败。" }));
@@ -174,11 +193,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes.autoTranslate) {
+  if (areaName !== "local") {
     return;
   }
 
-  void broadcastPublicSettings(Boolean(changes.autoTranslate.newValue));
+  if (changes.autoTranslate) {
+    void broadcastPublicSettings(Boolean(changes.autoTranslate.newValue));
+  }
+  if (
+    changes.deepSeekApiKey
+    || changes.siliconFlowApiKey
+    || changes.apiKey
+    || changes.siliconFlowModel
+    || changes.textProviderMode
+  ) {
+    void chrome.runtime
+      .sendMessage({ type: "PDF_PUBLIC_SETTINGS_CHANGED" })
+      .catch(() => undefined);
+  }
 });
 
 function createContextMenu() {
@@ -702,6 +734,20 @@ async function resolveTextRoute() {
   throw createAppError(
     "尚未配置硅基流动 API Key，请先打开扩展设置。",
     "SILICONFLOW_KEY_MISSING",
+  );
+}
+
+async function resolvePdfTextRoute() {
+  const settings = await loadProviderSettings();
+  if (settings.deepSeekApiKey) {
+    return createDeepSeekRoute(settings.deepSeekApiKey);
+  }
+  if (settings.siliconFlowApiKey) {
+    return createSiliconFlowRoute(settings.siliconFlowApiKey, settings.siliconFlowModel);
+  }
+  throw createAppError(
+    "PDF 文本翻译需要 DeepSeek 或硅基流动 API Key，请先打开扩展设置。",
+    "TEXT_PROVIDER_KEY_MISSING",
   );
 }
 
