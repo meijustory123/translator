@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const CONTENT_SCRIPT_VERSION = "1.2.0";
+  const CONTENT_SCRIPT_VERSION = "1.3.0";
   const forceReload = globalThis.__multiModelTranslatorForceReload === true;
   delete globalThis.__multiModelTranslatorForceReload;
 

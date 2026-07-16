@@ -27,7 +27,8 @@
 
         <label class="field-label" for="textProviderMode">划词与划段翻译</label>
         <select id="textProviderMode" class="select-field">
-          <option value="deepseek_first">DeepSeek 优先（未配置时使用硅基流动）</option>
+          <option value="deepseek">DeepSeek · deepseek-v4-flash</option>
+          <option value="siliconflow">硅基流动 · 使用下方所选 Qwen 模型</option>
         </select>
         <p id="routeHint" class="field-hint">
           图片翻译始终使用硅基流动和下方选择的 Qwen 多模态模型。
@@ -77,7 +78,7 @@
       <section class="settings-card provider-card" aria-labelledby="deepSeekHeading">
         <div class="section-heading">
           <div>
-            <span class="eyebrow">纯文本优先供应商</span>
+            <span class="eyebrow">纯文本供应商</span>
             <h2 id="deepSeekHeading">DeepSeek</h2>
           </div>
           <span id="deepSeekBadge" class="config-badge">未配置</span>
@@ -102,7 +103,7 @@
           <button id="toggleDeepSeekKey" class="field-button" type="button" aria-label="显示 DeepSeek API Key">显示</button>
         </div>
         <p id="deepSeekHint" class="field-hint">
-          “DeepSeek 优先”模式下，配置此密钥后，划词和划段翻译会使用 DeepSeek。
+          选择 DeepSeek 作为文本供应商时，划词、划段和 PDF 文字翻译会使用此密钥。
         </p>
 
         <div class="button-row">

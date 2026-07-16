@@ -15,7 +15,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -25,6 +26,7 @@ button {
 }
 
 button:focus-visible,
+select:focus-visible,
 input:focus-visible + .switch-track {
   outline: 2px solid #5b63ec;
   outline-offset: 2px;
@@ -72,6 +74,7 @@ h1 {
 }
 
 .status-card,
+.quick-switch-card,
 .toggle-row {
   display: flex;
   align-items: center;
@@ -83,6 +86,47 @@ h1 {
 
 .status-card {
   padding: 11px 12px;
+}
+
+.quick-switch-card {
+  display: flex;
+  align-items: stretch;
+  margin-top: 10px;
+  padding: 11px 12px;
+  flex-direction: column;
+}
+
+.quick-switch-card label {
+  margin-bottom: 7px;
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.quick-switch-card select {
+  width: 100%;
+  padding: 8px 9px;
+  color: #27344a;
+  background: #f8f9fd;
+  border: 1px solid #dfe4f0;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.quick-switch-card select:disabled {
+  color: #7c8698;
+  cursor: default;
+  opacity: 0.72;
+}
+
+.quick-switch-card p {
+  margin-top: 6px;
+  color: #687386;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.quick-switch-card p.error {
+  color: #c14757;
 }
 
 .status-stack {

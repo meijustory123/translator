@@ -19,7 +19,12 @@ import {
   isNamedExtensionPage,
   SENDER_KIND,
 } from "../shared/message-sender.js";
-import { chooseTextProvider } from "../shared/routing.js";
+import {
+  chooseTextProvider,
+  LEGACY_TEXT_PROVIDER_DEEPSEEK_FIRST,
+  TEXT_PROVIDER_DEEPSEEK,
+  TEXT_PROVIDER_SILICONFLOW,
+} from "../shared/routing.js";
 import { createPdfJobManager } from "./pdf-job-manager.js";
 
 const IMAGE_MENU_ID = "translate-image-with-siliconflow";
@@ -36,18 +41,15 @@ const MAX_ERROR_BODY_BYTES = 64 * 1_024;
 const MAX_STREAM_RESPONSE_BYTES = 8 * 1_024 * 1_024;
 const MAX_SSE_REMAINDER_CHARACTERS = 256 * 1_024;
 const MAX_STREAM_OUTPUT_CHARACTERS = 1_000_000;
-const TEXT_PROVIDER_DEEPSEEK_FIRST = "deepseek_first";
-const TEXT_PROVIDER_SILICONFLOW = "siliconflow";
 const pdfJobManager = createPdfJobManager({
-  resolveTextRoute: resolvePdfTextRoute,
+  resolveTextRoute,
   streamChatCompletion,
 });
 
-void initializeStorage();
+const storageReady = initializeStorage();
 
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   createContextMenu();
-  void initializeStorage();
 
   if (reason === "install") {
     void chrome.runtime.openOptionsPage();
@@ -56,7 +58,6 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 
 chrome.runtime.onStartup.addListener(() => {
   createContextMenu();
-  void initializeStorage();
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
@@ -138,15 +139,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_PDF_SETTINGS" && isPdfReaderPage) {
     void getPublicSettings()
       .then((settings) => {
-        const activeTextProvider = settings.hasDeepSeekKey
-          ? "deepseek"
-          : settings.hasSiliconFlowKey
-            ? "siliconflow"
-            : "";
+        const activeTextProvider = settings.activeTextProvider;
         const hasTextProvider = Boolean(activeTextProvider);
         const configurationHint = hasTextProvider
           ? ""
-          : "尚未配置 DeepSeek 或硅基流动 API Key，请先打开翻译设置。";
+          : settings.textProviderMode === TEXT_PROVIDER_DEEPSEEK
+            ? "当前选择了 DeepSeek，但尚未配置其 API Key，请先打开翻译设置。"
+            : "当前选择了硅基流动，但尚未配置其 API Key，请先打开翻译设置。";
         sendResponse({
           ok: settings.ok,
           hasTextProvider,
@@ -181,6 +180,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "SET_TEXT_MODEL" && isPopupPage) {
+    void setTextModel(message.provider, message.model)
+      .then((settings) => sendResponse(settings))
+      .catch((error) => sendResponse({
+        ok: false,
+        error: error?.code ? toUserMessage(error) : "模型选择保存失败，请重试。",
+      }));
+    return true;
+  }
+
   if (message.type === "TEST_CONNECTION" && isOptionsPage) {
     void testConnection(message.provider)
       .then((result) => sendResponse({ ok: true, result }))
@@ -202,6 +211,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   }
   if (
     changes.deepSeekApiKey
+    || changes.deepseekApiKey
     || changes.siliconFlowApiKey
     || changes.apiKey
     || changes.siliconFlowModel
@@ -247,15 +257,44 @@ async function migrateLegacySettings() {
     const settings = await chrome.storage.local.get({
       apiKey: "",
       siliconFlowApiKey: "",
+      deepSeekApiKey: "",
+      deepseekApiKey: "",
+      textProviderMode: LEGACY_TEXT_PROVIDER_DEEPSEEK_FIRST,
     });
     const legacyKey = normalizeSecret(settings.apiKey);
     const currentKey = normalizeSecret(settings.siliconFlowApiKey);
+    const legacyDeepSeekKey = normalizeSecret(settings.deepseekApiKey);
+    const currentDeepSeekKey = normalizeSecret(settings.deepSeekApiKey);
+    const updates = {};
 
     if (legacyKey && !currentKey) {
-      await chrome.storage.local.set({ siliconFlowApiKey: legacyKey });
+      updates.siliconFlowApiKey = legacyKey;
     }
+    if (legacyDeepSeekKey && !currentDeepSeekKey) {
+      updates.deepSeekApiKey = legacyDeepSeekKey;
+    }
+
+    if (
+      settings.textProviderMode !== TEXT_PROVIDER_DEEPSEEK
+      && settings.textProviderMode !== TEXT_PROVIDER_SILICONFLOW
+    ) {
+      updates.textProviderMode = currentDeepSeekKey || legacyDeepSeekKey
+        ? TEXT_PROVIDER_DEEPSEEK
+        : TEXT_PROVIDER_SILICONFLOW;
+    }
+    if (Object.keys(updates).length) {
+      await chrome.storage.local.set(updates);
+    }
+
+    const legacyKeys = [];
     if (settings.apiKey) {
-      await chrome.storage.local.remove("apiKey");
+      legacyKeys.push("apiKey");
+    }
+    if (settings.deepseekApiKey) {
+      legacyKeys.push("deepseekApiKey");
+    }
+    if (legacyKeys.length) {
+      await chrome.storage.local.remove(legacyKeys);
     }
   } catch {
     // Migration is best-effort; read helpers still understand the legacy key.
@@ -263,25 +302,32 @@ async function migrateLegacySettings() {
 }
 
 async function getPublicSettings() {
+  await storageReady;
   const settings = await chrome.storage.local.get({
     apiKey: "",
     siliconFlowApiKey: "",
     siliconFlowModel: DEFAULT_SILICONFLOW_MODEL,
     deepSeekApiKey: "",
-    textProviderMode: TEXT_PROVIDER_DEEPSEEK_FIRST,
+    deepseekApiKey: "",
+    textProviderMode: LEGACY_TEXT_PROVIDER_DEEPSEEK_FIRST,
     autoTranslate: true,
   });
 
   const siliconFlowApiKey = normalizeSecret(settings.siliconFlowApiKey || settings.apiKey);
-  const deepSeekApiKey = normalizeSecret(settings.deepSeekApiKey);
+  const deepSeekApiKey = normalizeSecret(settings.deepSeekApiKey || settings.deepseekApiKey);
   const siliconFlowModel = normalizeSiliconFlowModel(settings.siliconFlowModel);
-  const textProviderMode = normalizeTextProviderMode(settings.textProviderMode);
-  const activeTextProvider =
-    chooseTextProvider({ textProviderMode, deepSeekApiKey, siliconFlowApiKey }) || "siliconflow";
+  const textProviderMode = normalizeTextProviderMode(settings.textProviderMode, {
+    deepSeekApiKey,
+  });
+  const activeTextProvider = chooseTextProvider({
+    textProviderMode,
+    deepSeekApiKey,
+    siliconFlowApiKey,
+  });
   return {
     ok: true,
     autoTranslate: settings.autoTranslate !== false,
-    hasApiKey: activeTextProvider === "deepseek" ? Boolean(deepSeekApiKey) : Boolean(siliconFlowApiKey),
+    hasApiKey: Boolean(activeTextProvider),
     hasSiliconFlowKey: Boolean(siliconFlowApiKey),
     hasDeepSeekKey: Boolean(deepSeekApiKey),
     siliconFlowKeySuffix: siliconFlowApiKey ? siliconFlowApiKey.slice(-4) : "",
@@ -289,7 +335,7 @@ async function getPublicSettings() {
     siliconFlowModel,
     textProviderMode,
     activeTextProvider,
-    textModel: activeTextProvider === "deepseek" ? DEEPSEEK_MODEL : siliconFlowModel,
+    textModel: textProviderMode === TEXT_PROVIDER_DEEPSEEK ? DEEPSEEK_MODEL : siliconFlowModel,
     imageModel: siliconFlowModel,
   };
 }
@@ -302,10 +348,42 @@ function normalizeSiliconFlowModel(value) {
   return SILICONFLOW_MODELS.includes(value) ? value : DEFAULT_SILICONFLOW_MODEL;
 }
 
-function normalizeTextProviderMode(value) {
-  return value === TEXT_PROVIDER_SILICONFLOW
-    ? TEXT_PROVIDER_SILICONFLOW
-    : TEXT_PROVIDER_DEEPSEEK_FIRST;
+function normalizeTextProviderMode(value, { deepSeekApiKey = "" } = {}) {
+  if (value === TEXT_PROVIDER_DEEPSEEK || value === TEXT_PROVIDER_SILICONFLOW) {
+    return value;
+  }
+  return deepSeekApiKey ? TEXT_PROVIDER_DEEPSEEK : TEXT_PROVIDER_SILICONFLOW;
+}
+
+async function setTextModel(provider, model) {
+  const settings = await loadProviderSettings();
+  const updates = {};
+
+  if (provider === TEXT_PROVIDER_DEEPSEEK) {
+    if (!settings.deepSeekApiKey) {
+      throw createAppError("尚未配置 DeepSeek API Key，请先打开设置页。", "DEEPSEEK_KEY_MISSING");
+    }
+    updates.textProviderMode = TEXT_PROVIDER_DEEPSEEK;
+  } else if (provider === TEXT_PROVIDER_SILICONFLOW) {
+    if (!settings.siliconFlowApiKey) {
+      throw createAppError("尚未配置硅基流动 API Key，请先打开设置页。", "SILICONFLOW_KEY_MISSING");
+    }
+    if (!SILICONFLOW_MODELS.includes(model)) {
+      throw createAppError("不支持该硅基流动模型。", "INVALID_MODEL");
+    }
+    updates.textProviderMode = TEXT_PROVIDER_SILICONFLOW;
+    updates.siliconFlowModel = model;
+  } else {
+    throw createAppError("不支持该翻译供应商。", "INVALID_PROVIDER");
+  }
+
+  await chrome.storage.local.set(updates);
+  const persisted = await chrome.storage.local.get(Object.keys(updates));
+  const isPersisted = Object.entries(updates).every(([key, value]) => persisted[key] === value);
+  if (!isPersisted) {
+    throw createAppError("模型选择未能持久化，请重试。", "SETTINGS_NOT_PERSISTED");
+  }
+  return getPublicSettings();
 }
 
 async function broadcastPublicSettings(autoTranslate) {
@@ -698,19 +776,23 @@ async function blobToDataUrl(blob) {
 }
 
 async function loadProviderSettings() {
+  await storageReady;
   const settings = await chrome.storage.local.get({
     apiKey: "",
     siliconFlowApiKey: "",
     siliconFlowModel: DEFAULT_SILICONFLOW_MODEL,
     deepSeekApiKey: "",
-    textProviderMode: TEXT_PROVIDER_DEEPSEEK_FIRST,
+    deepseekApiKey: "",
+    textProviderMode: LEGACY_TEXT_PROVIDER_DEEPSEEK_FIRST,
   });
+
+  const deepSeekApiKey = normalizeSecret(settings.deepSeekApiKey || settings.deepseekApiKey);
 
   return {
     siliconFlowApiKey: normalizeSecret(settings.siliconFlowApiKey || settings.apiKey),
     siliconFlowModel: normalizeSiliconFlowModel(settings.siliconFlowModel),
-    deepSeekApiKey: normalizeSecret(settings.deepSeekApiKey),
-    textProviderMode: normalizeTextProviderMode(settings.textProviderMode),
+    deepSeekApiKey,
+    textProviderMode: normalizeTextProviderMode(settings.textProviderMode, { deepSeekApiKey }),
   };
 }
 
@@ -725,29 +807,15 @@ async function resolveTextRoute() {
     return createSiliconFlowRoute(settings.siliconFlowApiKey, settings.siliconFlowModel);
   }
 
-  if (settings.textProviderMode === TEXT_PROVIDER_DEEPSEEK_FIRST) {
+  if (settings.textProviderMode === TEXT_PROVIDER_DEEPSEEK) {
     throw createAppError(
-      "尚未配置 DeepSeek 或硅基流动 API Key，请先打开扩展设置。",
-      "TEXT_PROVIDER_KEY_MISSING",
+      "当前选择了 DeepSeek，但尚未配置其 API Key，请先打开扩展设置。",
+      "DEEPSEEK_KEY_MISSING",
     );
   }
   throw createAppError(
     "尚未配置硅基流动 API Key，请先打开扩展设置。",
     "SILICONFLOW_KEY_MISSING",
-  );
-}
-
-async function resolvePdfTextRoute() {
-  const settings = await loadProviderSettings();
-  if (settings.deepSeekApiKey) {
-    return createDeepSeekRoute(settings.deepSeekApiKey);
-  }
-  if (settings.siliconFlowApiKey) {
-    return createSiliconFlowRoute(settings.siliconFlowApiKey, settings.siliconFlowModel);
-  }
-  throw createAppError(
-    "PDF 文本翻译需要 DeepSeek 或硅基流动 API Key，请先打开扩展设置。",
-    "TEXT_PROVIDER_KEY_MISSING",
   );
 }
 

@@ -37,6 +37,29 @@
         <button id="settingsShortcut" class="link-button" type="button">设置</button>
       </section>
 
+      <section class="quick-switch-card" aria-labelledby="quickModelLabel">
+        <label id="quickModelLabel" for="quickTextModel">文本翻译模型</label>
+        <select id="quickTextModel" disabled>
+          <optgroup label="DeepSeek">
+            <option value="deepseek::deepseek-v4-flash" data-provider="deepseek">
+              deepseek-v4-flash
+            </option>
+          </optgroup>
+          <optgroup label="硅基流动">
+            <option value="siliconflow::Qwen/Qwen3.5-4B" data-provider="siliconflow">
+              Qwen/Qwen3.5-4B
+            </option>
+            <option value="siliconflow::Qwen/Qwen3.5-35B-A3B" data-provider="siliconflow">
+              Qwen/Qwen3.5-35B-A3B
+            </option>
+            <option value="siliconflow::Qwen/Qwen3.5-397B-A17B" data-provider="siliconflow">
+              Qwen/Qwen3.5-397B-A17B
+            </option>
+          </optgroup>
+        </select>
+        <p id="quickModelHint">正在读取可用模型…</p>
+      </section>
+
       <label class="toggle-row" for="autoTranslate">
         <span>
           <strong>自动划词翻译</strong>

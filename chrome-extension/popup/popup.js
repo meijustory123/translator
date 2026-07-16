@@ -4,6 +4,8 @@ const modelStatus = document.querySelector("#modelStatus");
 const imageStatusDot = document.querySelector("#imageStatusDot");
 const imageKeyStatus = document.querySelector("#imageKeyStatus");
 const imageModelStatus = document.querySelector("#imageModelStatus");
+const quickTextModel = document.querySelector("#quickTextModel");
+const quickModelHint = document.querySelector("#quickModelHint");
 const autoTranslate = document.querySelector("#autoTranslate");
 const imageTranslate = document.querySelector("#imageTranslate");
 const pdfTranslate = document.querySelector("#pdfTranslate");
@@ -12,6 +14,9 @@ const feedback = document.querySelector("#feedback");
 const pageStatus = document.querySelector("#pageStatus");
 const EXPECTED_CONTENT_SCRIPT_VERSION = chrome.runtime.getManifest().version;
 const contentReadinessChecks = new Map();
+const DEEPSEEK_MODEL = "deepseek-v4-flash";
+const TEXT_PROVIDER_DEEPSEEK = "deepseek";
+const TEXT_PROVIDER_SILICONFLOW = "siliconflow";
 
 void initialize();
 
@@ -22,40 +27,7 @@ async function initialize() {
       throw new Error(settings?.error || "读取设置失败");
     }
 
-    autoTranslate.checked = settings.autoTranslate;
-    autoTranslate.disabled = false;
-    imageTranslate.disabled = !settings.hasSiliconFlowKey;
-
-    statusDot.classList.remove("loading");
-    imageStatusDot.classList.remove("loading");
-    if (settings.hasApiKey) {
-      statusDot.classList.remove("missing");
-      if (settings.activeTextProvider === "deepseek") {
-        keyStatus.textContent = `文本：DeepSeek 已就绪 ····${settings.deepSeekKeySuffix}`;
-        modelStatus.textContent = settings.textModel;
-      } else {
-        keyStatus.textContent = `文本：硅基流动已就绪 ····${settings.siliconFlowKeySuffix}`;
-        modelStatus.textContent = settings.textModel;
-      }
-    } else {
-      statusDot.classList.add("missing");
-      keyStatus.textContent = "文本翻译尚未配置可用密钥";
-      modelStatus.textContent = "请打开设置页";
-    }
-
-    if (settings.hasSiliconFlowKey) {
-      imageStatusDot.classList.remove("missing");
-      imageKeyStatus.textContent = `图片：硅基流动已就绪 ····${settings.siliconFlowKeySuffix}`;
-      imageModelStatus.textContent = settings.imageModel;
-    } else {
-      imageStatusDot.classList.add("missing");
-      imageKeyStatus.textContent = "图片翻译需要硅基流动密钥";
-      imageModelStatus.textContent = settings.imageModel;
-    }
-
-    if (!settings.hasApiKey || !settings.hasSiliconFlowKey) {
-      feedback.textContent = "部分功能尚未配置，请到设置页补充密钥。";
-    }
+    renderSettings(settings);
     void ensureCurrentPageReady();
   } catch {
     statusDot.classList.remove("loading");
@@ -64,8 +36,94 @@ async function initialize() {
     imageStatusDot.classList.add("missing");
     keyStatus.textContent = "无法读取扩展设置";
     imageKeyStatus.textContent = "无法读取扩展设置";
+    quickTextModel.disabled = true;
+    quickModelHint.textContent = "无法读取模型列表。";
+    quickModelHint.classList.add("error");
     feedback.textContent = "请重新加载扩展后再试。";
     setPageStatus("无法连接扩展后台，请重新加载扩展。", "error");
+  }
+}
+
+quickTextModel.addEventListener("change", async () => {
+  const previousValue = quickTextModel.dataset.persistedValue || "";
+  const [provider, model] = quickTextModel.value.split("::", 2);
+  quickTextModel.disabled = true;
+  quickModelHint.classList.remove("error");
+  quickModelHint.textContent = "正在保存模型选择…";
+  feedback.textContent = "";
+
+  try {
+    const result = await chrome.runtime.sendMessage({
+      type: "SET_TEXT_MODEL",
+      provider,
+      model,
+    });
+    if (!result?.ok) {
+      throw new Error(result?.error || "模型切换失败。");
+    }
+    renderSettings(result);
+    quickModelHint.textContent = `已切换到${provider === TEXT_PROVIDER_DEEPSEEK ? " DeepSeek" : "硅基流动"} ${model}。`;
+  } catch (error) {
+    quickTextModel.value = previousValue;
+    quickTextModel.disabled = false;
+    quickModelHint.textContent = error?.message || "模型切换失败，请重试。";
+    quickModelHint.classList.add("error");
+  }
+});
+
+function renderSettings(settings) {
+  autoTranslate.checked = settings.autoTranslate;
+  autoTranslate.disabled = false;
+  imageTranslate.disabled = !settings.hasSiliconFlowKey;
+
+  statusDot.classList.remove("loading", "missing");
+  imageStatusDot.classList.remove("loading", "missing");
+  if (settings.activeTextProvider === TEXT_PROVIDER_DEEPSEEK) {
+    keyStatus.textContent = `文本：DeepSeek 已就绪 ····${settings.deepSeekKeySuffix}`;
+    modelStatus.textContent = DEEPSEEK_MODEL;
+  } else if (settings.activeTextProvider === TEXT_PROVIDER_SILICONFLOW) {
+    keyStatus.textContent = `文本：硅基流动已就绪 ····${settings.siliconFlowKeySuffix}`;
+    modelStatus.textContent = settings.siliconFlowModel;
+  } else {
+    statusDot.classList.add("missing");
+    const providerLabel = settings.textProviderMode === TEXT_PROVIDER_DEEPSEEK
+      ? "DeepSeek"
+      : "硅基流动";
+    keyStatus.textContent = `文本：${providerLabel}尚未配置密钥`;
+    modelStatus.textContent = settings.textModel;
+  }
+
+  if (settings.hasSiliconFlowKey) {
+    imageKeyStatus.textContent = `图片：硅基流动已就绪 ····${settings.siliconFlowKeySuffix}`;
+    imageModelStatus.textContent = settings.imageModel;
+  } else {
+    imageStatusDot.classList.add("missing");
+    imageKeyStatus.textContent = "图片翻译需要硅基流动密钥";
+    imageModelStatus.textContent = settings.imageModel;
+  }
+
+  const selectedValue = settings.textProviderMode === TEXT_PROVIDER_DEEPSEEK
+    ? `${TEXT_PROVIDER_DEEPSEEK}::${DEEPSEEK_MODEL}`
+    : `${TEXT_PROVIDER_SILICONFLOW}::${settings.siliconFlowModel}`;
+  for (const option of quickTextModel.querySelectorAll("option[data-provider]")) {
+    option.disabled = option.dataset.provider === TEXT_PROVIDER_DEEPSEEK
+      ? !settings.hasDeepSeekKey
+      : !settings.hasSiliconFlowKey;
+  }
+  quickTextModel.value = selectedValue;
+  quickTextModel.dataset.persistedValue = selectedValue;
+  quickTextModel.disabled = !settings.hasDeepSeekKey && !settings.hasSiliconFlowKey;
+  quickModelHint.classList.remove("error");
+  if (!settings.hasDeepSeekKey && !settings.hasSiliconFlowKey) {
+    quickModelHint.textContent = "请先在设置页配置至少一个供应商密钥。";
+  } else if (!settings.hasDeepSeekKey || !settings.hasSiliconFlowKey) {
+    quickModelHint.textContent = "未配置密钥的供应商暂不可选，可在设置页补充。";
+  } else {
+    quickModelHint.textContent = "切换会立即保存，并用于后续划词、划段和 PDF 文字翻译。";
+  }
+
+  if (!settings.hasApiKey || !settings.hasSiliconFlowKey) {
+    feedback.textContent = "部分功能尚未配置，请到设置页补充密钥。";
   }
 }
 

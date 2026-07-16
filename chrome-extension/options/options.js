@@ -4,7 +4,9 @@ const SILICONFLOW_MODELS = [
   "Qwen/Qwen3.5-35B-A3B",
   "Qwen/Qwen3.5-397B-A17B",
 ];
-const TEXT_PROVIDER_DEEPSEEK_FIRST = "deepseek_first";
+const TEXT_PROVIDER_DEEPSEEK = "deepseek";
+const TEXT_PROVIDER_SILICONFLOW = "siliconflow";
+const LEGACY_TEXT_PROVIDER_DEEPSEEK_FIRST = "deepseek_first";
 
 const textProviderMode = document.querySelector("#textProviderMode");
 const routeHint = document.querySelector("#routeHint");
@@ -35,7 +37,7 @@ const providers = {
     badgeId: "deepSeekBadge",
     hintId: "deepSeekHint",
     displayName: "DeepSeek",
-    emptyHint: "“DeepSeek 优先”模式下，配置此密钥后，划词和划段翻译会使用 DeepSeek。",
+    emptyHint: "选择 DeepSeek 作为文本供应商时，划词、划段和 PDF 文字翻译会使用此密钥。",
   }),
 };
 
@@ -48,17 +50,22 @@ async function initialize() {
   siliconFlowModel.addEventListener("change", () => void saveSiliconFlowModel());
 
   try {
+    const ready = await chrome.runtime.sendMessage({ type: "GET_PUBLIC_SETTINGS" });
+    if (!ready?.ok) {
+      throw new Error(ready?.error || "后台设置尚未就绪。");
+    }
     const settings = await chrome.storage.local.get({
       apiKey: "",
       siliconFlowApiKey: "",
       siliconFlowModel: DEFAULT_SILICONFLOW_MODEL,
       deepSeekApiKey: "",
-      textProviderMode: TEXT_PROVIDER_DEEPSEEK_FIRST,
+      deepseekApiKey: "",
+      textProviderMode: LEGACY_TEXT_PROVIDER_DEEPSEEK_FIRST,
     });
 
     const legacyKey = normalizeSecret(settings.apiKey);
     const siliconFlowKey = normalizeSecret(settings.siliconFlowApiKey || legacyKey);
-    const deepSeekKey = normalizeSecret(settings.deepSeekApiKey);
+    const deepSeekKey = normalizeSecret(settings.deepSeekApiKey || settings.deepseekApiKey);
 
     if (legacyKey && !normalizeSecret(settings.siliconFlowApiKey)) {
       await chrome.storage.local.set({ siliconFlowApiKey: legacyKey });
@@ -66,10 +73,17 @@ async function initialize() {
     if (settings.apiKey) {
       await chrome.storage.local.remove("apiKey");
     }
+    if (deepSeekKey && !normalizeSecret(settings.deepSeekApiKey)) {
+      await chrome.storage.local.set({ deepSeekApiKey: deepSeekKey });
+    }
+    if (settings.deepseekApiKey) {
+      await chrome.storage.local.remove("deepseekApiKey");
+    }
 
-    textProviderMode.value = TEXT_PROVIDER_DEEPSEEK_FIRST;
-    if (settings.textProviderMode !== TEXT_PROVIDER_DEEPSEEK_FIRST) {
-      await chrome.storage.local.set({ textProviderMode: TEXT_PROVIDER_DEEPSEEK_FIRST });
+    const selectedProvider = normalizeTextProviderMode(settings.textProviderMode, deepSeekKey);
+    textProviderMode.value = selectedProvider;
+    if (settings.textProviderMode !== selectedProvider) {
+      await chrome.storage.local.set({ textProviderMode: selectedProvider });
     }
     siliconFlowModel.value = SILICONFLOW_MODELS.includes(settings.siliconFlowModel)
       ? settings.siliconFlowModel
@@ -126,8 +140,11 @@ function bindProviderEvents(providerName) {
 }
 
 async function saveRoutingMode() {
+  const mode = textProviderMode.value === TEXT_PROVIDER_DEEPSEEK
+    ? TEXT_PROVIDER_DEEPSEEK
+    : TEXT_PROVIDER_SILICONFLOW;
   try {
-    await chrome.storage.local.set({ textProviderMode: TEXT_PROVIDER_DEEPSEEK_FIRST });
+    await persistSettings({ textProviderMode: mode });
     updateRouteHint();
   } catch {
     routeHint.textContent = "供应商偏好保存失败，请重试。";
@@ -140,7 +157,7 @@ async function saveSiliconFlowModel() {
     ? siliconFlowModel.value
     : DEFAULT_SILICONFLOW_MODEL;
   try {
-    await chrome.storage.local.set({ siliconFlowModel: model });
+    await persistSettings({ siliconFlowModel: model });
     setProviderStatus("siliconflow", `已切换为 ${model}。`, "success");
     updateRouteHint();
   } catch {
@@ -170,11 +187,26 @@ async function saveProvider(providerName, shouldTest) {
         ? siliconFlowModel.value
         : DEFAULT_SILICONFLOW_MODEL;
     }
-    await chrome.storage.local.set(updates);
+    const selectedProviderName = textProviderMode.value === TEXT_PROVIDER_DEEPSEEK
+      ? "deepseek"
+      : "siliconflow";
+    if (
+      enteredKey
+      && providerName !== selectedProviderName
+      && !providers[selectedProviderName].hasSavedKey
+    ) {
+      updates.textProviderMode = providerName === "deepseek"
+        ? TEXT_PROVIDER_DEEPSEEK
+        : TEXT_PROVIDER_SILICONFLOW;
+    }
+    const persisted = await persistSettings(updates);
 
     if (enteredKey) {
-      updateProviderState(providerName, enteredKey);
+      updateProviderState(providerName, persisted[provider.storageKey]);
       provider.input.value = "";
+    }
+    if (persisted.textProviderMode) {
+      textProviderMode.value = persisted.textProviderMode;
     }
 
     if (!shouldTest) {
@@ -209,7 +241,14 @@ async function clearProvider(providerName) {
   setProviderButtonsDisabled(providerName, true);
 
   try {
-    await chrome.storage.local.remove(provider.storageKey);
+    const keysToRemove = providerName === "deepseek"
+      ? [provider.storageKey, "deepseekApiKey"]
+      : [provider.storageKey];
+    await chrome.storage.local.remove(keysToRemove);
+    const persisted = await chrome.storage.local.get(keysToRemove);
+    if (keysToRemove.some((key) => normalizeSecret(persisted[key]))) {
+      throw new Error("密钥未能从本地存储中清除，请重试。");
+    }
     provider.input.value = "";
     updateProviderState(providerName, "");
     setProviderStatus(providerName, `已清除${provider.displayName} API Key。`, "success");
@@ -239,14 +278,18 @@ function updateProviderState(providerName, apiKey) {
 
 function updateRouteHint() {
   routeHint.classList.remove("error-text");
+  if (textProviderMode.value === TEXT_PROVIDER_SILICONFLOW) {
+    routeHint.textContent = providers.siliconflow.hasSavedKey
+      ? `当前文本翻译使用硅基流动 ${siliconFlowModel.value}；图片使用同一模型。`
+      : "当前选择了硅基流动，但尚未配置其 API Key。";
+    return;
+  }
+
   if (providers.deepseek.hasSavedKey) {
     routeHint.textContent =
-      "当前划词与划段翻译优先使用 DeepSeek deepseek-v4-flash；图片仍使用硅基流动。";
-  } else if (providers.siliconflow.hasSavedKey) {
-    routeHint.textContent =
-      `尚未配置 DeepSeek，纯文本暂时回退到硅基流动 ${siliconFlowModel.value}；图片仍使用硅基流动。`;
+      "当前文本翻译使用 DeepSeek deepseek-v4-flash；图片仍使用硅基流动。";
   } else {
-    routeHint.textContent = "尚未配置可用于纯文本翻译的 API Key；图片翻译也不可用。";
+    routeHint.textContent = "当前选择了 DeepSeek，但尚未配置其 API Key。";
   }
 }
 
@@ -266,4 +309,21 @@ function setProviderStatus(providerName, message, type) {
 
 function normalizeSecret(value) {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function normalizeTextProviderMode(value, deepSeekKey) {
+  if (value === TEXT_PROVIDER_DEEPSEEK || value === TEXT_PROVIDER_SILICONFLOW) {
+    return value;
+  }
+  return deepSeekKey ? TEXT_PROVIDER_DEEPSEEK : TEXT_PROVIDER_SILICONFLOW;
+}
+
+async function persistSettings(updates) {
+  await chrome.storage.local.set(updates);
+  const persisted = await chrome.storage.local.get(Object.keys(updates));
+  const isPersisted = Object.entries(updates).every(([key, value]) => persisted[key] === value);
+  if (!isPersisted) {
+    throw new Error("设置未能持久化，请重试。");
+  }
+  return persisted;
 }
